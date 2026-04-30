@@ -1,0 +1,13 @@
+{
+  "channel_id": "UCxxxxxxxxxxxxxxxxxxxxxx",
+  "channel_name": "Example Main Channel",
+  "context": "Multi-paragraph description of what the channel is about. Topics covered. Editorial style. Recurring formats. Anything that informs how titles, descriptions, and thumbnails should feel.",
+  "tone": "casual / educational / authoritative / humorous / spiritual / hype",
+  "audience": "Target viewer profile: who they are, what they care about, what stage of journey they are in.",
+  "language": "Telugu",
+  "language_code": "te",
+  "calendar_db_id": "00000000-0000-0000-0000-000000000000",
+  "channels_db_page_id": "00000000-0000-0000-0000-000000000000",
+  "default_cta": "Like, subscribe, and hit the bell. Drop your questions in the comments.",
+  "last_synced_from_notion": "2026-04-30T00:00:00Z"
+}

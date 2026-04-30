@@ -1,0 +1,33 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp.*
+.yarn/
+.yarnrc
+
+# npm pack output
+*.tgz
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
+.vs/
+
+# Local skill state (the installer drops these under ~/.claude/skills/...,
+# but if you symlink the source repo as the install target during dev, ignore them here too)
+state/channels/*.json
+state/runs/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example

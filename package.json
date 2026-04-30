@@ -1,0 +1,48 @@
+{
+  "name": "youtube-content-workflow",
+  "version": "1.0.0",
+  "description": "Claude Code skill: end-to-end YouTube production pipeline (Notion calendar -> NotebookLM deep research -> scheduled upload, never public).",
+  "keywords": [
+    "claude-code",
+    "claude-skill",
+    "youtube",
+    "youtube-automation",
+    "notion",
+    "notebooklm",
+    "nano-banana",
+    "ai-agent",
+    "mcp",
+    "content-creation"
+  ],
+  "homepage": "https://github.com/vamsikrishnakodimela/maagpi-youtube-workflow-skill#readme",
+  "bugs": {
+    "url": "https://github.com/vamsikrishnakodimela/maagpi-youtube-workflow-skill/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vamsikrishnakodimela/maagpi-youtube-workflow-skill.git"
+  },
+  "author": {
+    "name": "Vamsi Krishna Kodimela",
+    "email": "kodimela.krishna@razorpay.com"
+  },
+  "license": "MIT",
+  "bin": {
+    "youtube-content-workflow": "bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "SKILL.md",
+    "schemas/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "prepack": "node scripts/prepublish-check.js",
+    "prepublishOnly": "node scripts/prepublish-check.js"
+  }
+}

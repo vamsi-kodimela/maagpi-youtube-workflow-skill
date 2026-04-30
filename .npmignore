@@ -1,0 +1,26 @@
+# The `files` field in package.json is the source of truth for what gets
+# published. This .npmignore exists only to belt-and-suspenders out things that
+# would never make sense in the published tarball if `files` is ever loosened.
+
+# Source repo extras
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+.claude/
+
+# Shell installers — npx CLI replaces these for npm consumers, and the source
+# files in this list ARE NOT in package.json#files anyway. Listed here as
+# documentation of intent.
+install.ps1
+install.sh
+uninstall.ps1
+uninstall.sh
+
+# Pack output
+*.tgz
+
+# OS
+.DS_Store
+Thumbs.db
