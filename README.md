@@ -1,10 +1,38 @@
 # YouTube Content Workflow Skill
 
-![Claude Code](https://img.shields.io/badge/Claude%20Code-skill-blueviolet)
+[![Claude Code](https://img.shields.io/badge/Claude%20Code-skill-blueviolet?logo=anthropic&logoColor=white)](https://claude.com/claude-code)
+[![npm version](https://img.shields.io/npm/v/youtube-content-workflow.svg?logo=npm)](https://www.npmjs.com/package/youtube-content-workflow)
+[![npm downloads](https://img.shields.io/npm/dm/youtube-content-workflow.svg?logo=npm)](https://www.npmjs.com/package/youtube-content-workflow)
+[![Node >=18](https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)](#quick-install)
+[![Privacy: never public](https://img.shields.io/badge/upload-never%20public-critical)](#why-this-skill-)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/vamsi-kodimela/maagpi-youtube-workflow-skill/pulls)
+[![GitHub stars](https://img.shields.io/github/stars/vamsi-kodimela/maagpi-youtube-workflow-skill?style=social)](https://github.com/vamsi-kodimela/maagpi-youtube-workflow-skill)
 
 YouTube Content Workflow is a **Claude Code skill** that turns a Notion content calendar into scheduled YouTube videos end-to-end: pick a channel, generate SUCCESS-framework titles, run NotebookLM **deep research**, generate an Explainer video in the channel's language, transcribe it, draft the description, build the thumbnail (preferring Nano Banana Pro), generate tags, and schedule upload — **never public**.
 
 This repository is the source for the skill. After install it lives at `~/.claude/skills/youtube-content-workflow/` and is invoked via the `/youtube-content-workflow` slash command.
+
+## Getting started
+
+The fastest path from zero to a scheduled upload:
+
+1. **Install [Claude Code](https://claude.com/claude-code)** and sign in.
+2. **Wire up the MCPs** listed under [Prerequisites](#prerequisites) — Notion, NotebookLM, YouTube, an image-gen MCP (Nano Banana Pro preferred), and a transcription source. Phase 0 of the skill probes each one and halts with the missing-tool name if any are absent.
+3. **Set up the Notion databases** described in [`schemas/notion-databases.md`](schemas/notion-databases.md) (`YouTube Channels` + `Content Calendar`) and add at least one upcoming topic with a `Publish Date`.
+4. **Install the skill:**
+   ```bash
+   npx youtube-content-workflow install
+   ```
+   Re-run after pulling updates — it's idempotent.
+5. **Run it from Claude Code:**
+   ```text
+   /youtube-content-workflow
+   ```
+   Pick the channel, approve titles, review the generated assets, choose `private` or `unlisted`, and the skill schedules the uploads.
+
+See the [Phase Reference](#phase-reference) for what happens at each step and the [Example](#example) for a full annotated run.
 
 ## Skill
 
