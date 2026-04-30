@@ -26,7 +26,7 @@ desktop.ini
 # but if you symlink the source repo as the install target during dev, ignore them here too)
 state/channels/*.json
 state/runs/
-
+dist/
 # Environment / secrets
 .env
 .env.*
