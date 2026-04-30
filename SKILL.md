@@ -311,39 +311,53 @@ Verify the notebook now has sources (call `mcp__notebooklm-mcp__source_list_driv
 
 ### STEP 3.4 — Generate Explainer video in channel language
 
-Call `mcp__notebooklm-mcp__studio_create` with the **exact parameter names the MCP expects** — the MCP swallows unknown keys and falls back to defaults (English, generic prompt), so use these verbatim:
+Use the unified studio creation tool `mcp__notebooklm-mcp__studio_create` with the exact parameter shape below. Do **not** use the legacy `video` CLI tool or any other variant — this is the only supported call for this workflow.
 
-Param: `notebook_id`
-Value: `{NOTEBOOK_ID}`
-Notes: required
-────────────────────────────────────────
-Param: `artifact_type`
-Value: `"video"`
-Notes: required
-────────────────────────────────────────
-Param: `video_format`
-Value: `"explainer"`
-Notes: lowercase. NOT `format`
-────────────────────────────────────────
-Param: `language`
-Value: `{CHANNEL_LANGUAGE}` — e.g. `"Telugu"`, `"English"`, `"Hindi"`
-Notes: language name as it appears in the NotebookLM UI dropdown, not a code like `te`/`en`. The Studio video overview supports any language NotebookLM offers; manual UI generation has been confirmed working for non-English languages, so if this call ignores the language, the param name or value is wrong — do not silently accept English output.
-────────────────────────────────────────
-Param: `focus_prompt`
-Value: `{FINAL_TITLE}` — the title/topic
-Notes: steers content. NOT `prompt`
-────────────────────────────────────────
-Param: `video_style_prompt`
-Value: optional
-Notes: visual-style steering, separate from `focus_prompt`
-────────────────────────────────────────
-Param: `confirm`
-Value: `true`
-Notes: MCP rejects unconfirmed calls
+#### Pre-call checks (run in order — skipping these is the most common failure mode)
 
-Capture the artifact ID from the response as `{STUDIO_JOB_ID}` (the response shape is per-MCP — typically `artifact_id` or `id`).
+1. **Verify auth is fresh.** If any prior MCP call in this session returned `Authentication expired`, call `mcp__notebooklm-mcp__refresh_auth` first. If that does not resolve it, ask the user to run `! nlm login` in the prompt, then call `refresh_auth` again. Do not attempt video generation while auth is expired — the call will fail with `Could not retrieve notebook sources`, which is a *misleading* downstream symptom of expired auth.
+2. **Confirm sources exist.** Call `mcp__notebooklm-mcp__notebook_get` with `{NOTEBOOK_ID}` and verify `source_count > 0`. A notebook with zero sources will fail video generation with the same misleading sources error. If `source_count == 0`, halt and surface — step 3.3 should have populated sources, so this indicates an upstream failure to investigate, not a retry candidate.
 
-Poll `mcp__notebooklm-mcp__studio_status` with `notebook_id={NOTEBOOK_ID}` every ~30 seconds. Cap at 20 attempts (≈10 minutes). The status action lists all artifacts with their status — find the entry matching `{STUDIO_JOB_ID}` and stop when its status is `complete` / `done`.
+#### Required parameters
+
+| Param | Value | Notes |
+|---|---|---|
+| `notebook_id` | `{NOTEBOOK_ID}` | UUID from step 3.1 |
+| `artifact_type` | `"video"` | string literal — not `video_overview` or any alias |
+| `video_format` | `"explainer"` | do not omit — defaults are not safe to rely on |
+| `language` | `{CHANNEL_LANGUAGE}` — full English-language name, e.g. `"Telugu"`, `"Hindi"`, `"English"`, `"Kannada"`, `"Tamil"`, `"Spanish"` | **Never** use ISO codes (`te`, `hi`, `en`) or shortcuts — the MCP expects the full English-language name of the target language |
+| `confirm` | `true` | mandatory — the tool refuses to start generation without explicit confirmation |
+
+#### Optional parameters
+
+Only set these if the user explicitly requested them — otherwise omit and let NotebookLM defaults apply:
+
+- `video_style_prompt` — string for visual-style guidance
+- `focus_prompt` — string to bias the narrative toward specific angles
+- `custom_prompt` — string for full prompt override
+- `source_ids` — array of source UUIDs to restrict generation to a subset (defaults to all sources)
+
+#### Expected success response shape
+
+```json
+{
+  "status": "success",
+  "artifact_type": "video",
+  "artifact_id": "<uuid>",
+  "artifact_status": "in_progress",
+  "message": "Video generation started.",
+  "notebook_url": "https://notebooklm.google.com/notebook/<notebook_id>"
+}
+```
+
+Capture `artifact_id` as `{STUDIO_JOB_ID}` — required for polling and download.
+
+#### Polling for completion
+
+- Call `mcp__notebooklm-mcp__studio_status` with `notebook_id={NOTEBOOK_ID}` to list all artifacts; find the entry matching `{STUDIO_JOB_ID}`.
+- Telugu and other non-English explainer videos typically take **5–15 minutes**. Poll at ~60s intervals; **do not poll faster than every 30s**. Cap at 20 attempts (≈20 minutes).
+- Treat `artifact_status: "in_progress"` as expected. Only proceed to step 3.5 when status is `"completed"` (or equivalent terminal-success value) and a download URL is present.
+- If status becomes `"failed"` or `"error"`, surface the error message **verbatim** to the user — do not retry blindly.
 
 > ⚠️ **Language verification.** After download (step 3.5) and before description drafting (step 3.7), spot-check the first 30 seconds of the transcript: if `{CHANNEL_LANGUAGE}` is non-English and the transcript came back in English, the language param did not take. Halt and tell the user — do not proceed to publish a wrong-language video.
 
@@ -738,7 +752,9 @@ If any topic shows `⚠️ NEEDS MANUAL FIX`, list each one explicitly below the
 | Title gen subagent fails | Re-spawn that one subagent; if fails twice, ask user to type 5 titles for that topic manually |
 | `research_start` mode parameter rejected | Try alternate naming (`type=deep`, `level=deep`); if all fail, ask user |
 | `research_status` polling times out (>15 min) | Save state, surface error, ask user to retry or skip |
-| `studio_create` fails | Retry once after 60s; if fails again, surface error |
+| `studio_create` returns `Could not retrieve notebook sources` | Likely expired auth or zero sources. Run pre-call checks (refresh_auth → `nlm login` if needed → `notebook_get` to confirm `source_count > 0`); only retry once both pass |
+| `studio_create` returns `failed` / `error` from polling | Surface the error message verbatim to the user; do not retry blindly |
+| `studio_status` polling exceeds ~20 min without `completed` | Save state, surface to user, ask whether to keep waiting or skip |
 | Video file 0 bytes after `download_artifact` | Retry once; if still empty, surface |
 | Transcription path fails | Try next path in priority. If all fail, ask user |
 | Thumbnail Pillow composite fails | Use base image without overlay; flag in summary |
