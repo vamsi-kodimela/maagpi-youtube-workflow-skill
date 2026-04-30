@@ -14,13 +14,13 @@
     "mcp",
     "content-creation"
   ],
-  "homepage": "https://github.com/vamsikrishnakodimela/maagpi-youtube-workflow-skill#readme",
+  "homepage": "https://github.com/vamsi-kodimela/maagpi-youtube-workflow-skill#readme",
   "bugs": {
-    "url": "https://github.com/vamsikrishnakodimela/maagpi-youtube-workflow-skill/issues"
+    "url": "https://github.com/vamsi-kodimela/maagpi-youtube-workflow-skill/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vamsikrishnakodimela/maagpi-youtube-workflow-skill.git"
+    "url": "git+https://github.com/vamsi-kodimela/maagpi-youtube-workflow-skill.git"
   },
   "author": {
     "name": "Vamsi Krishna Kodimela",

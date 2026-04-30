@@ -36,7 +36,7 @@ npx youtube-content-workflow install
 If the package isn't on npm yet, install straight from GitHub:
 
 ```bash
-npx github:vamsikrishnakodimela/maagpi-youtube-workflow-skill install
+npx github:vamsi-kodimela/maagpi-youtube-workflow-skill install
 ```
 
 Subcommands:
@@ -54,7 +54,7 @@ Requires Node ≥ 18. The CLI is cross-platform (macOS, Linux, Windows) and does
 ### macOS / Linux (clone + shell)
 
 ```bash
-git clone https://github.com/vamsikrishnakodimela/maagpi-youtube-workflow-skill.git
+git clone https://github.com/vamsi-kodimela/maagpi-youtube-workflow-skill.git
 cd maagpi-youtube-workflow-skill
 chmod +x install.sh
 ./install.sh
@@ -63,7 +63,7 @@ chmod +x install.sh
 ### Windows (PowerShell, clone)
 
 ```powershell
-git clone https://github.com/vamsikrishnakodimela/maagpi-youtube-workflow-skill.git
+git clone https://github.com/vamsi-kodimela/maagpi-youtube-workflow-skill.git
 cd maagpi-youtube-workflow-skill
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 ./install.ps1
