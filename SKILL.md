@@ -311,14 +311,35 @@ Verify the notebook now has sources (call `mcp__notebooklm-mcp__source_list_driv
 
 ### STEP 3.4 — Generate Explainer video in channel language
 
-Call `mcp__notebooklm-mcp__studio_create` with the **exact parameter names the MCP expects** (these were verified against the live tool schema — older drafts of this skill used wrong names that silently fall through to defaults):
+Call `mcp__notebooklm-mcp__studio_create` with the **exact parameter names the MCP expects** — the MCP swallows unknown keys and falls back to defaults (English, generic prompt), so use these verbatim:
 
-- `notebook_id` = `{NOTEBOOK_ID}`  *(required)*
-- `artifact_type` = `"video"`  *(required)*
-- `video_format` = `"explainer"`  *(lowercase; this is the param name, NOT `format`)*
-- `language` = `{CHANNEL_LANGUAGE}`  *(pass the language name as it appears in the NotebookLM UI dropdown — e.g. `"Telugu"`, `"English"`, `"Hindi"`. The Studio video overview supports any language NotebookLM offers; manual UI generation has been confirmed working for non-English languages, so if this call ignores the language, the param name or value is wrong — do not silently accept English output)*
-- `focus_prompt` = `{FINAL_TITLE}`  *(this steers the video's content focus — NOT `prompt`. If you want to also influence visual style, add `video_style_prompt` separately)*
-- `confirm` = `true`  *(the MCP requires this after user approval; without it the call will be rejected as unconfirmed)*
+Param: `notebook_id`
+Value: `{NOTEBOOK_ID}`
+Notes: required
+────────────────────────────────────────
+Param: `artifact_type`
+Value: `"video"`
+Notes: required
+────────────────────────────────────────
+Param: `video_format`
+Value: `"explainer"`
+Notes: lowercase. NOT `format`
+────────────────────────────────────────
+Param: `language`
+Value: `{CHANNEL_LANGUAGE}` — e.g. `"Telugu"`, `"English"`, `"Hindi"`
+Notes: language name as it appears in the NotebookLM UI dropdown, not a code like `te`/`en`. The Studio video overview supports any language NotebookLM offers; manual UI generation has been confirmed working for non-English languages, so if this call ignores the language, the param name or value is wrong — do not silently accept English output.
+────────────────────────────────────────
+Param: `focus_prompt`
+Value: `{FINAL_TITLE}` — the title/topic
+Notes: steers content. NOT `prompt`
+────────────────────────────────────────
+Param: `video_style_prompt`
+Value: optional
+Notes: visual-style steering, separate from `focus_prompt`
+────────────────────────────────────────
+Param: `confirm`
+Value: `true`
+Notes: MCP rejects unconfirmed calls
 
 Capture the artifact ID from the response as `{STUDIO_JOB_ID}` (the response shape is per-MCP — typically `artifact_id` or `id`).
 
