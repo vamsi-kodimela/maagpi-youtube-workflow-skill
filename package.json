@@ -1,6 +1,6 @@
 {
   "name": "youtube-content-workflow",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Claude Code skill: end-to-end YouTube production pipeline (Notion calendar -> NotebookLM deep research -> scheduled upload, never public).",
   "keywords": [
     "claude-code",
