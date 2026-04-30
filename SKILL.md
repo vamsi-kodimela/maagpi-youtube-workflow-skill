@@ -311,17 +311,20 @@ Verify the notebook now has sources (call `mcp__notebooklm-mcp__source_list_driv
 
 ### STEP 3.4 — Generate Explainer video in channel language
 
-Call `mcp__notebooklm-mcp__studio_create` with:
+Call `mcp__notebooklm-mcp__studio_create` with the **exact parameter names the MCP expects** (these were verified against the live tool schema — older drafts of this skill used wrong names that silently fall through to defaults):
 
-- `notebook_id` = `{NOTEBOOK_ID}`
-- `artifact_type` = `"video"`
-- `format` = `"Explainer"` (the NotebookLM video format name)
-- `language` = `{CHANNEL_LANGUAGE}`
-- `prompt` = `{FINAL_TITLE}`
+- `notebook_id` = `{NOTEBOOK_ID}`  *(required)*
+- `artifact_type` = `"video"`  *(required)*
+- `video_format` = `"explainer"`  *(lowercase; this is the param name, NOT `format`)*
+- `language` = `{CHANNEL_LANGUAGE}`  *(pass the language name as it appears in the NotebookLM UI dropdown — e.g. `"Telugu"`, `"English"`, `"Hindi"`. The Studio video overview supports any language NotebookLM offers; manual UI generation has been confirmed working for non-English languages, so if this call ignores the language, the param name or value is wrong — do not silently accept English output)*
+- `focus_prompt` = `{FINAL_TITLE}`  *(this steers the video's content focus — NOT `prompt`. If you want to also influence visual style, add `video_style_prompt` separately)*
+- `confirm` = `true`  *(the MCP requires this after user approval; without it the call will be rejected as unconfirmed)*
 
-Capture `{STUDIO_JOB_ID}`.
+Capture the artifact ID from the response as `{STUDIO_JOB_ID}` (the response shape is per-MCP — typically `artifact_id` or `id`).
 
-Poll `mcp__notebooklm-mcp__studio_status` every ~30 seconds. Cap at 20 attempts (≈10 minutes). Stop when status is `complete` / `done`.
+Poll `mcp__notebooklm-mcp__studio_status` with `notebook_id={NOTEBOOK_ID}` every ~30 seconds. Cap at 20 attempts (≈10 minutes). The status action lists all artifacts with their status — find the entry matching `{STUDIO_JOB_ID}` and stop when its status is `complete` / `done`.
+
+> ⚠️ **Language verification.** After download (step 3.5) and before description drafting (step 3.7), spot-check the first 30 seconds of the transcript: if `{CHANNEL_LANGUAGE}` is non-English and the transcript came back in English, the language param did not take. Halt and tell the user — do not proceed to publish a wrong-language video.
 
 ### STEP 3.5 — Download video
 
@@ -367,11 +370,27 @@ Write to `<topic_dir>/description.txt`. Store as `{DESCRIPTION}`.
 Generate two artifacts:
 
 - `{THUMBNAIL_TEXT}` — 2–5 word overlay text, in `{CHANNEL_LANGUAGE}`, optimized for mobile readability (high contrast, big-feeling words). Match channel tone.
-- `{THUMBNAIL_IMAGE_PROMPT}` — a visual scene description for the image gen model. Should:
-  - Match the channel's vibe (use `{CHANNEL_TONE}` and `{CHANNEL_CONTEXT}` to inform palette, mood, style).
-  - Be designed for click-curiosity (clear focal subject, expressive face if relevant, contrast).
-  - Reference the title's core idea concretely.
-  - **Do NOT include the overlay text in the image prompt** — the model rendering of text is unreliable. Compose the visual only.
+- `{THUMBNAIL_IMAGE_PROMPT}` — a single combined prompt that describes **both the visual scene and the rendered text overlay**, so the image model produces a finished thumbnail in one shot. Modern models (Nano Banana Pro / Gemini 3 Pro Image) render text reliably when it's specified explicitly. The prompt must include:
+
+  **Visual section:**
+  - Channel vibe (use `{CHANNEL_TONE}` and `{CHANNEL_CONTEXT}` to inform palette, mood, style).
+  - Click-curiosity composition: clear focal subject, expressive face if relevant, strong foreground/background separation, leave deliberate negative space where the text will sit.
+  - Concrete reference to the title's core idea.
+  - Aspect ratio: 16:9.
+
+  **Text section** (inline in the same prompt):
+  - The exact string to render: `"{THUMBNAIL_TEXT}"`, in `{CHANNEL_LANGUAGE}` (specify the script — e.g. "Telugu script", "Devanagari", "Latin").
+  - Placement (e.g. "bottom-left third", "upper right corner") — must not overlap the focal subject.
+  - Style: bold sans-serif, heavy weight, large enough to read on a phone (~12–15% of frame height).
+  - Contrast treatment: white fill with dark drop shadow OR dark fill on a bright pill — pick whichever the visual demands.
+  - Spelling: "render the text exactly as written, no substitutions" (this guard matters for non-Latin scripts).
+
+Example combined prompt shape:
+```
+A {visual scene description, palette, mood, focal subject, composition, negative space for text}.
+16:9 aspect ratio. Overlay the text "{THUMBNAIL_TEXT}" in {language/script}, bold sans-serif,
+{placement}, {contrast treatment}. Render the text exactly as written.
+```
 
 Save both to `<topic_dir>/thumbnail-spec.json`:
 ```json
@@ -380,9 +399,18 @@ Save both to `<topic_dir>/thumbnail-spec.json`:
 
 ### STEP 3.9 — Generate thumbnail image
 
-Call `{IMG_GEN}` with `{THUMBNAIL_IMAGE_PROMPT}`. Aspect ratio: 16:9 (1280×720 minimum). Save the result to `<topic_dir>/thumbnail-base.png`.
+Call `{IMG_GEN}` with `{THUMBNAIL_IMAGE_PROMPT}` (which already includes the text overlay instructions from 3.8). Aspect ratio: 16:9 (1280×720 minimum). Save the result directly to `<topic_dir>/thumbnail.png`.
 
-Then composite `{THUMBNAIL_TEXT}` onto the base image. Use Bash with Python (Pillow) for portability:
+**Verify the rendered text.** Open the generated image and confirm `{THUMBNAIL_TEXT}` is present, spelled correctly, and legible. If the model garbled the text (common signs: dropped/added characters, wrong script, glyphs that don't match `{CHANNEL_LANGUAGE}`), regenerate **once** with a stronger spelling guard appended to the prompt:
+
+```
+The text must read exactly: "{THUMBNAIL_TEXT}". Do not paraphrase, translate, or
+substitute characters. {CHANNEL_LANGUAGE} script only.
+```
+
+If the second attempt is still wrong, fall back to the Pillow composite path: save the model output as `<topic_dir>/thumbnail-base.png` (no text), then overlay `{THUMBNAIL_TEXT}` programmatically using the script below.
+
+**Pillow fallback (only when model text rendering fails twice):**
 
 ```
 python -c "
@@ -566,23 +594,87 @@ For each successfully uploaded topic with a `{NOTION_PAGE_ID}`, update via `mcp_
 - `Status` = `Scheduled`
 - `YouTube Video ID` = `{YOUTUBE_VIDEO_ID}`
 
-### STEP 5.4 — Final summary
+### STEP 5.4 — Post-upload verification + auto-fix
+
+The upload response is not authoritative — re-fetch each video from YouTube and compare against what we sent. This catches silent drops (tags exceeding length cap, thumbnail upload failing, scheduled time wrong timezone, default language not applied) and the most dangerous failure mode: a video that ended up `public`.
+
+For each `{YOUTUBE_VIDEO_ID}`, probe the YouTube MCP for a "get video" tool via `ToolSearch` with `"youtube video get"` (likely `mcp__maagpi-youtube-mcp__youtube_video_get`). Bind as `{YT_GET_VIDEO}`. Call it with the video ID requesting `snippet,status,localizations` (or whatever the tool exposes).
+
+Compare each field against the source of truth and record mismatches:
+
+| Field | Source of truth | Severity if mismatched |
+|---|---|---|
+| `privacyStatus` | `{PRIVACY}` (must be `private` or `unlisted`) | **CRITICAL** — public must be flipped immediately |
+| `publishAt` (or `scheduledPublishTime`) | `{PUBLISH_DATE}` in RFC3339 UTC | high |
+| `title` | `{FINAL_TITLE}` (exact match) | high |
+| `description` | contents of `<topic_dir>/description.txt` | medium |
+| `tags` | array from `<topic_dir>/tags.json` | medium |
+| `thumbnail` (custom thumbnail set?) | `<topic_dir>/thumbnail.png` was uploaded | high |
+| `defaultLanguage` / `defaultAudioLanguage` | `{CHANNEL_LANGUAGE_CODE}` | low |
+
+**For tags**, YouTube enforces a 500-char total tag-string cap and silently drops the overflow. Verify the returned tag list contains every tag we sent; if any are missing, that's a mismatch.
+
+**For thumbnail**, the get response usually exposes `thumbnails.maxres.url` (or `default.url`) — if it points to an auto-generated frame instead of the custom upload, treat as missing.
+
+**For `publishAt`**, allow ≤60s drift to absorb timezone/RFC3339 formatting quirks; anything larger is a real mismatch.
+
+**Auto-fix per field** — call the most specific tool available, in this priority:
+
+| Field mismatched | Fix call |
+|---|---|
+| `privacyStatus` is `public` | **Immediately** call `mcp__maagpi-youtube-mcp__youtube_video_set_privacy` with `{PRIVACY}`. Do this before any other fix. |
+| `privacyStatus` is wrong but not public | `youtube_video_set_privacy` |
+| `publishAt` mismatch | `mcp__maagpi-youtube-mcp__youtube_video_schedule_publish` with the correct RFC3339 |
+| `thumbnail` mismatch | `mcp__maagpi-youtube-mcp__youtube_video_set_thumbnail` with `<topic_dir>/thumbnail.png` |
+| `title` / `description` / `tags` / `defaultLanguage` mismatch | `mcp__maagpi-youtube-mcp__youtube_video_update` with the corrected fields |
+
+Each fix call: cap retries at 1. If a fix fails twice, surface the specific field + error to the user — do not silently leave a public video live.
+
+After fixes, **re-fetch the video once** to confirm every previously-mismatched field is now correct. If any field still mismatches after the fix attempt, flag that topic in the final summary as `⚠️ NEEDS MANUAL FIX` with the field name and current YouTube value.
+
+Save the verification report to `<topic_dir>/verify.json`:
+
+```json
+{
+  "video_id": "{YOUTUBE_VIDEO_ID}",
+  "checked_at": "<ISO timestamp>",
+  "fields": [
+    {"field": "privacyStatus", "expected": "private", "actual": "private", "ok": true},
+    {"field": "publishAt", "expected": "...", "actual": "...", "ok": true},
+    ...
+  ],
+  "fixes_applied": [
+    {"field": "thumbnail", "tool": "youtube_video_set_thumbnail", "result": "ok"}
+  ],
+  "manual_fix_needed": []
+}
+```
+
+If concurrency-safe, verify all topics in parallel via `Agent` subagents (one per `{YOUTUBE_VIDEO_ID}`); otherwise sequential.
+
+> ⚠️ **Hard guardrail.** If any video is found `public`, flip it to `{PRIVACY}` first, then complete the rest of the verification. Even if the user later wants public, this skill never leaves a video public — they must flip it manually in YouTube Studio.
+
+### STEP 5.5 — Final summary
 
 Print to the user:
 
 ```
 ✅ YouTube workflow complete for run {RUN_ID}.
 
-| # | Topic | Title | Scheduled | Privacy | YouTube | Notion |
-|---|---|---|---|---|---|---|
-| 1 | ... | ... | YYYY-MM-DD HH:MM | private | https://youtu.be/... | https://www.notion.so/... |
-| 2 | ... | ... |  ...  | ...  | ...  | ...  |
+| # | Topic | Title | Scheduled | Privacy | Verified | YouTube | Notion |
+|---|---|---|---|---|---|---|---|
+| 1 | ... | ... | YYYY-MM-DD HH:MM | private | ✅ all fields match | https://youtu.be/... | https://www.notion.so/... |
+| 2 | ... | ... |  ...  | ...  | 🔧 fixed: thumbnail | ...  | ...  |
+| 3 | ... | ... |  ...  | ...  | ⚠️ NEEDS MANUAL FIX: tags | ...  | ...  |
 
 📁 Artifacts: ~/.claude/skills/youtube-content-workflow/state/runs/{RUN_ID}/
+   Per-topic verify reports: <topic_dir>/verify.json
 
 Reminder: all videos are scheduled as {PRIVACY}. Flip to public manually in YouTube
 Studio after you've watched the final cut.
 ```
+
+If any topic shows `⚠️ NEEDS MANUAL FIX`, list each one explicitly below the table with the field, the expected value, the actual YouTube value, and a direct link to the video's edit page in YouTube Studio.
 
 ---
 
@@ -632,6 +724,9 @@ Studio after you've watched the final cut.
 | Pre-flight assert fails at 5.1 | Halt with the specific check that failed; do not upload |
 | Upload returns error | Surface error to user; do NOT retry automatically (avoid double-uploads) |
 | Notion update fails | Continue (artifacts already on disk + uploaded); print warning |
+| 5.4 verify finds video is `public` | **Immediately** call `youtube_video_set_privacy` with `{PRIVACY}`; re-fetch to confirm; then continue verifying other fields |
+| 5.4 verify finds field mismatch | Call the field-specific fix tool (set_privacy / schedule_publish / set_thumbnail / video_update); re-fetch to confirm; if still mismatched after one fix attempt, mark `⚠️ NEEDS MANUAL FIX` in the final summary |
+| 5.4 `youtube_video_get` fails for a video | Retry once; if still failing, mark that topic as `⚠️ verification skipped` and link to YouTube Studio edit URL so the user can review manually |
 
 ---
 
