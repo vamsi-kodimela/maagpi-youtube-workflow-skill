@@ -27,15 +27,15 @@ End-to-end YouTube production: channel context → Notion calendar → titles �
 
 ## Tools used / required
 
-| Capability | How to find it | Required? |
-|---|---|---|
-| Notion read/write | `mcp__claude_ai_Notion__*` (already installed) | yes |
-| NotebookLM deep research + Studio video | `mcp__notebooklm-mcp__*` (already installed) | yes |
-| YouTube channel list, recent titles, scheduled upload | YouTube MCP — user installs separately. Probe via `ToolSearch` with query like `"youtube channel upload"` or `"youtube list videos"`. | yes |
-| Image generation (thumbnail) | Image gen MCP — user installs separately. **Prefer Nano Banana Pro.** Probe via `ToolSearch` with queries `"nano banana"`, then `"image generation"`, then `"gemini image"`. Use the first matching tool. | yes |
-| Transcription | Order: dedicated transcription MCP → NotebookLM `studio_status` transcript field → local `whisper` via Bash | one of these |
+| Capability | How to find it | Install reference (if missing) | Required? |
+|---|---|---|---|
+| Notion read/write | `mcp__claude_ai_Notion__*` (already installed) | — | yes |
+| NotebookLM deep research + Studio video | `mcp__notebooklm-mcp__*` | https://mcpservers.org/servers/roomi-fields/notebooklm-mcp | yes |
+| YouTube channel list, recent titles, scheduled upload | YouTube MCP — probe via `ToolSearch` with `"youtube channel upload"` or `"youtube list videos"` | https://github.com/vamsi-kodimela/maagpi-youtube-mcp | yes |
+| Image generation (thumbnail) | Image gen MCP — **prefer Nano Banana Pro.** Probe via `ToolSearch` with `"nano banana"`, then `"image generation"`, then `"gemini image"` | https://github.com/vamsi-kodimela/maagpi-images-mcp | yes |
+| Transcription | Order: dedicated transcription MCP → NotebookLM `studio_status` transcript field → local `whisper` via Bash | — | one of these |
 
-If any required capability is missing, **halt at Phase 0.1** with a clear message naming the missing tool — do not fall back silently.
+If any required capability is missing, **halt at Phase 0.1** with a clear message naming the missing tool *and* the install reference URL above — do not fall back silently.
 
 ---
 
@@ -59,14 +59,18 @@ Bind the discovered tool names to local variables:
 - `{IMG_GEN}` — the image generation tool (preferring Nano Banana Pro)
 - `{TRANSCRIBE}` — the transcription tool, OR `null` if falling back to local whisper
 
-If `{YT_LIST_CHANNELS}`, `{YT_UPLOAD}`, or `{IMG_GEN}` are missing, stop and tell the user:
+If `{YT_LIST_CHANNELS}`, `{YT_UPLOAD}`, or `{IMG_GEN}` are missing, stop and tell the user — include the install reference URL for each missing capability:
 
 ```
 ⚠️ Missing prerequisite MCP(s):
-  - <list each missing capability and the kind of tool needed>
+  - YouTube MCP        → https://github.com/vamsi-kodimela/maagpi-youtube-mcp
+  - Image generation   → https://github.com/vamsi-kodimela/maagpi-images-mcp
+  - NotebookLM MCP     → https://mcpservers.org/servers/roomi-fields/notebooklm-mcp
+
+(Only list the ones actually missing.)
 
 Install the MCP(s) and re-run /youtube-content-workflow. The skill will not proceed
-without these because uploads/thumbnails would not be possible.
+without these because uploads/thumbnails/research would not be possible.
 ```
 
 ### STEP 0.2 — Pick a channel

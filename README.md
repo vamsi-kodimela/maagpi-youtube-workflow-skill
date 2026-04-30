@@ -46,10 +46,12 @@ See the [Phase Reference](#phase-reference) for what happens at each step and th
 The skill orchestrates external MCPs at runtime. **Install these in your Claude environment before first use** — Phase 0 of the skill probes each one and halts with the exact missing-tool name if any are absent.
 
 - **Notion MCP** — read the content calendar, write per-channel context
-- **NotebookLM MCP** — `notebook_create`, `research_start` (deep mode), `studio_create`, `download_artifact`
-- **YouTube MCP** — list user's channels, fetch recent video titles, schedule uploads with privacy `private` / `unlisted`
-- **Image generation MCP** — Nano Banana Pro preferred; falls back to other Gemini/Imagen tools at runtime
+- **NotebookLM MCP** — `notebook_create`, `research_start` (deep mode), `studio_create`, `download_artifact` · install: <https://mcpservers.org/servers/roomi-fields/notebooklm-mcp>
+- **YouTube MCP** — list user's channels, fetch recent video titles, schedule uploads with privacy `private` / `unlisted` · install: <https://github.com/vamsi-kodimela/maagpi-youtube-mcp>
+- **Image generation MCP** — Nano Banana Pro preferred; falls back to other Gemini/Imagen tools at runtime · install: <https://github.com/vamsi-kodimela/maagpi-images-mcp>
 - **Transcription** — dedicated MCP, NotebookLM `studio_status` transcript field, or local `whisper` (auto-detected, in that order)
+
+> Don't have these MCPs yet? The links above point to ready-to-install servers. Phase 0.1 prints them in the halt message if anything is missing.
 
 > Never publish public. The skill enforces `privacy != public` with a pre-flight assertion before every upload call. There is no opt-out.
 
