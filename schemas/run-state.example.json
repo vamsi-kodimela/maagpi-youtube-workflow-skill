@@ -1,0 +1,52 @@
+{
+  "_comment": "Run-level manifest. Lives at <run_dir>/run.json. Written by orchestrator at Phase 2.1; updated as topics transition status. Phase -1 re-entry detection scans this file across all run dirs to find in-flight batches.",
+  "run_id": "run-2026-05-01-a1b2c3",
+  "team_name": "youtube-svasti-kannada",
+  "channel_id": "UCjnh-5JgUmD4RaNwFBSx0xA",
+  "channel_profile": "svasti-kannada",
+  "channel_name": "ಸ್ವಸ್ತಿ",
+  "started_at": "2026-05-01T04:00:00Z",
+  "privacy": "private",
+  "concurrency_cap": 3,
+  "publish_strategy": {
+    "mode": "channel-default",
+    "default_publish_time_utc": "00:30"
+  },
+  "topics": [
+    {
+      "topic_slug": "mookambika-shukravara-pooja",
+      "topic": "ಶಾಸ್ತ್ರದ ಪ್ರಕಾರ ಮೂಕಾಂಬಿಕಾ ಶುಕ್ರವಾರ ಪೂಜೆ",
+      "publish_at_utc": "2026-05-01T12:30:00Z",
+      "notion_page_id": "3523eedc-20dc-817a-bfbc-c42c6686dc25",
+      "topic_dir": "<run_dir>/mookambika-shukravara-pooja",
+      "status": "ready_for_review",
+      "topic_runner_name": "topic-runner-mookambika-shukravara-pooja"
+    },
+    {
+      "topic_slug": "second-topic-slug",
+      "topic": "...",
+      "publish_at_utc": "2026-05-02T00:30:00Z",
+      "notion_page_id": "...",
+      "topic_dir": "<run_dir>/second-topic-slug",
+      "status": "in_progress",
+      "topic_runner_name": "topic-runner-second-topic-slug"
+    },
+    {
+      "topic_slug": "third-topic-slug",
+      "topic": "...",
+      "publish_at_utc": "2026-05-03T00:30:00Z",
+      "notion_page_id": "...",
+      "topic_dir": "<run_dir>/third-topic-slug",
+      "status": "queued",
+      "topic_runner_name": null
+    }
+  ],
+  "_status_legend": {
+    "queued": "topic-* task created but not yet owned by a runner (concurrency cap reached)",
+    "in_progress": "topic-runner is alive and working — see topic state.json for step detail",
+    "ready_for_review": "Phase 3.11 done; awaiting Phase 4 user gate",
+    "uploaded": "Phase 5 done; verify.json on disk; Notion Status=Done",
+    "failed": "terminal failure recorded in topic state.json errors[]",
+    "skipped": "user picked Skip in Phase 4 review"
+  }
+}

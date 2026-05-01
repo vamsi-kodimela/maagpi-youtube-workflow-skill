@@ -1,27 +1,32 @@
 ---
 name: youtube-content-workflow
-description: End-to-end YouTube production pipeline. Selects a channel, reads the Notion content calendar, generates 5 SEO + SUCCESS-framework title variations per topic, runs NotebookLM **deep research** (not fast), generates an Explainer video in the channel's language, downloads it, transcribes it, drafts the description, builds a thumbnail prompt + image (preferring Nano Banana Pro), generates tags, and schedules upload to YouTube as **private** (or unlisted) — never public. Use this skill whenever the user wants to run the full YouTube workflow, says things like "create my YouTube videos", "publish my next YouTube video", "schedule videos from my calendar", "youtube workflow", "run the YouTube content pipeline", "create videos for this week", or anything similar.
+description: End-to-end YouTube production pipeline run by a persistent per-channel agent team. Reads the Notion content calendar, generates 5 SUCCESS-framework title variations per topic, runs NotebookLM **deep research** (not fast), generates an Explainer video in the channel's language, downloads it, transcribes it, drafts the description, builds a thumbnail prompt + image (preferring Nano Banana Pro), generates tags, and schedules upload to YouTube as **private** (or unlisted) — never public. Persistent per-channel teams with long-lived `researcher` + `uploader` and ad-hoc `topic-runner` agents (cap 3 concurrent) deliver intra-topic fan-out, batch throughput, and per-step checkpoint resume. Use this skill whenever the user wants to run the full YouTube workflow, says things like "create my YouTube videos", "publish my next YouTube video", "schedule videos from my calendar", "youtube workflow", "run the YouTube content pipeline", "create videos for this week", "resume the youtube batch", or anything similar.
 ---
 
-# YouTube Content Workflow
+# YouTube Content Workflow (v2.0 — Persistent Teams)
 
-End-to-end YouTube production: channel context → Notion calendar → titles → research → video → transcript → description → thumbnail → tags → scheduled upload.
+End-to-end YouTube production: re-entry detection → channel + team init → calendar + upfront gates → titles → research → per-topic fan-out (video, transcript, description, thumbnail, tags) → review → scheduled upload. Heavy work runs on a **persistent per-channel team** in the background; the orchestrator collects all user gates upfront and returns. Re-running `/youtube-content-workflow` re-attaches and shows progress.
 
 **State location (canonical for this skill):**
-- Local cache: `~/.claude/skills/youtube-content-workflow/state/channels/<channel_id>.json`
-- Per-run artifacts: `~/.claude/skills/youtube-content-workflow/state/runs/<run_id>/<topic_slug>/`
+- Local channel cache: `~/.claude/skills/youtube-content-workflow/state/channels/<channel_id>.json`
+- Per-run artifacts + checkpoints: `~/.claude/skills/youtube-content-workflow/state/runs/<run_id>/<topic_slug>/`
+- Per-topic checkpoint: `<topic_dir>/state.json` (see `schemas/topic-state.example.json`)
+- Run-level manifest: `<run_dir>/run.json` (see `schemas/run-state.example.json`)
+- Team config: `~/.claude/teams/<channel_team_name>/config.json` (created by `TeamCreate`)
 - Notion (canonical truth): `YouTube Channels` DB + Content Calendar DB (see `schemas/notion-databases.md`)
 
 ---
 
 ## Critical rules (read before doing anything)
 
-1. **Never publish public.** This skill never sets `privacy=public` on any upload call. Default is `private`. `unlisted` requires explicit user opt-in in Phase 4. Any code path that could result in a public publish is a defect — abort and tell the user.
+1. **Never publish public.** This skill never sets `privacy=public` on any upload call. Default is `private`. `unlisted` requires explicit user opt-in. Any code path that could result in a public publish is a defect — abort and tell the user.
 2. **Never hallucinate.** Channel names, calendar entries, topics, video URLs, transcripts, tags must trace to a tool call. If a tool returns empty or ambiguous output, ask the user — do not invent.
-3. **Verify each step's predecessor before continuing.** File on disk? Response non-empty? Status field present? Check before proceeding.
+3. **Verify each step's predecessor before continuing.** File on disk? Response non-empty? Status field present? Check before proceeding. The per-topic `state.json` records what's done; never advance a step without writing it.
 4. **Language preservation.** If the channel's language is Telugu, the description and tags stay in Telugu. Do not silently translate to English.
 5. **Title pick belongs to the user.** Always surface all 5 candidates and let them choose — even if you privately rank one as best.
 6. **Never edit the user's Notion database schema.** If a required field is missing, tell the user exactly what to add.
+7. **Gates are collected upfront, not interleaved with heavy work.** Phase 1 collects every user choice (titles, privacy, publish slots) before Phase 3 starts. Once the team is dispatched, the orchestrator returns; the team never asks the user mid-run.
+8. **Checkpoint after every step.** Each `topic-runner` writes `state.json` after each of 3.4–3.11. Resume reads this and skips done steps. Long-lived `researcher` and `uploader` write to the same file under a `roles.<role>.steps.<id>` namespace.
 
 ---
 
@@ -34,12 +39,189 @@ End-to-end YouTube production: channel context → Notion calendar → titles �
 | YouTube channel list, recent titles, scheduled upload | YouTube MCP — probe via `ToolSearch` with `"youtube channel upload"` or `"youtube list videos"` | https://github.com/vamsi-kodimela/maagpi-youtube-mcp | yes |
 | Image generation (thumbnail) | Image gen MCP — **prefer Nano Banana Pro.** Probe via `ToolSearch` with `"nano banana"`, then `"image generation"`, then `"gemini image"` | https://github.com/vamsi-kodimela/maagpi-images-mcp | yes |
 | Transcription | Order: dedicated transcription MCP → NotebookLM `studio_status` transcript field → local `whisper` via Bash | — | one of these |
+| Team primitives | `TeamCreate`, `TeamDelete`, `SendMessage`, `Agent` with `team_name`/`name`, `TaskCreate`/`TaskList`/`TaskUpdate` (built-in) | — | yes |
 
 If any required capability is missing, **halt at Phase 0.1** with a clear message naming the missing tool *and* the install reference URL above — do not fall back silently.
 
 ---
 
-## PHASE 0 — Channel + first-time context
+## Architecture overview
+
+### Persistent per-channel team
+
+For each YouTube channel the user works on, this skill manages **one long-lived team**:
+
+- Team name = `youtube-<channel_profile>` (e.g., `youtube-svasti-kannada`).
+- Team file: `~/.claude/teams/youtube-<channel_profile>/config.json`.
+- The team has a 1:1 task list at `~/.claude/tasks/youtube-<channel_profile>/`. The orchestrator and all team members read/write tasks here for cross-step coordination.
+- The team **persists across sessions**. Closing Claude Code does not delete the team — re-running `/youtube-content-workflow` re-attaches.
+
+### Roles inside the team
+
+| Role | Lifetime | Owns | Spawned via |
+|---|---|---|---|
+| **`researcher`** | Long-lived (one per team) | NotebookLM auth context, channel research patterns, Phase 3.1–3.3 (notebook create → deep research → import). Holds master-notebook references for the channel. | `Agent(team_name=<team>, name="researcher", subagent_type="general-purpose")` |
+| **`uploader`** | Long-lived (one per team) | YouTube upload / set-thumbnail / verify / auto-fix. Tracks YouTube quota. Phase 5. | `Agent(team_name=<team>, name="uploader", subagent_type="general-purpose")` |
+| **`topic-runner-<slug>`** | Ad-hoc (one per topic, terminated when topic completes) | Phase 3.4–3.11 for a single topic with intra-topic fan-out (description + thumbnail + tags concurrent; image gen during video poll; transcript on download). | `Agent(team_name=<team>, name="topic-runner-<slug>", subagent_type="general-purpose")` |
+
+### Concurrency cap
+
+At any moment the orchestrator allows **at most 3** `topic-runner` agents in flight per team. Larger batches queue. Cap is fixed (not user-asked each run) — NotebookLM and YouTube quotas are the bottleneck.
+
+### Intra-topic parallelism (inside one `topic-runner`)
+
+Every `topic-runner` MUST execute the following concurrency plan, not a serial 3.4–3.11 chain:
+
+1. **3.4 video gen** kicks off → poll runs in background.
+2. **As soon as 3.4 is submitted** (artifact_id captured): fan out **3.7 description draft (skeleton from research)**, **3.8 thumbnail spec**, and **3.10 tags** in parallel via `Agent` tool calls in a single message. Each writes its file and returns.
+3. **As soon as 3.8 returns** with the prompt: kick off **3.9 image gen** in parallel with the still-running video poll.
+4. When **3.5 download** completes: kick off **3.6 transcription** in background. Merge transcript into the description (refine 3.7) and finalize tags (3.10) when transcription lands. If transcription fails or takes >5 min, ship the research-derived description (it stays correct because research is sourced).
+5. When all of (video.mp4, thumbnail.png, transcript.txt OR research-derived description, tags.json) exist on disk: 3.11 writes `metadata.json` and updates Notion `Status = Ready`.
+
+This cuts ~30–60% off per-topic wall time vs. serial.
+
+### Checkpoint protocol
+
+Every step writes `<topic_dir>/state.json` on completion. Schema (see `schemas/topic-state.example.json` for reference):
+
+```json
+{
+  "run_id": "run-...",
+  "topic_slug": "...",
+  "channel_id": "UC...",
+  "team_name": "youtube-...",
+  "topic_runner_name": "topic-runner-...",
+  "started_at": "2026-05-01T04:00:00Z",
+  "last_updated": "2026-05-01T04:12:00Z",
+  "steps": {
+    "3.1": {"status": "done", "completed_at": "...", "outputs": {"notebook_id": "..."}},
+    "3.2": {"status": "done", "completed_at": "...", "outputs": {"research_id": "..."}},
+    "3.3": {"status": "done", "completed_at": "..."},
+    "3.4": {"status": "in_progress", "started_at": "...", "outputs": {"studio_job_id": "..."}},
+    "3.5": {"status": "pending"},
+    "3.6": {"status": "pending"},
+    "3.7": {"status": "in_progress", "outputs": {"draft": "skeleton-from-research"}},
+    "3.8": {"status": "done", "completed_at": "..."},
+    "3.9": {"status": "in_progress"},
+    "3.10": {"status": "done", "completed_at": "..."},
+    "3.11": {"status": "pending"}
+  },
+  "errors": [],
+  "fanout_in_progress": ["3.4", "3.7", "3.9"]
+}
+```
+
+`status` values: `pending` (not started), `in_progress` (running), `done` (completed), `failed` (terminal error, see `errors`), `skipped` (intentionally bypassed).
+
+**Resume rule:** when a `topic-runner` is spawned (or re-spawned) for an existing topic_slug, it MUST first read `state.json` and skip every step where `status == "done"`. For `in_progress` steps, it inspects whether the underlying job is still alive (e.g., poll `studio_status` with the saved `studio_job_id`) before re-issuing.
+
+### Run lifecycle
+
+```
+[user] /youtube-content-workflow
+   │
+   ▼
+PHASE -1 ── re-entry detection ──▶ if in-flight batch found, ask: continue / status / new / cancel
+   │
+   ▼
+PHASE 0 ── channel + team init  (sync, in main session)
+   │   ├─ probe MCPs
+   │   ├─ pick channel
+   │   ├─ load/capture channel context
+   │   ├─ TeamCreate (or attach) youtube-<profile>
+   │   └─ ensure researcher + uploader are alive
+   ▼
+PHASE 1 ── calendar + upfront gates  (sync, in main session)
+   │   ├─ date range
+   │   ├─ query Notion → {TOPICS}
+   │   └─ collect ALL gates upfront: privacy, publish slots, batch confirmation
+   ▼
+PHASE 2 ── parallel title generation  (sync, in main session)
+   │   ├─ N title-gen subagents (one per topic) in team namespace
+   │   └─ user picks final title per topic (gate)
+   ▼
+PHASE 3 ── heavy pipeline  (BACKGROUND, on the team)
+   │   ├─ orchestrator creates run.json + per-topic state.json files
+   │   ├─ orchestrator dispatches Phase 3.1–3.3 to `researcher`
+   │   ├─ orchestrator spawns topic-runner-<slug> agents capped at 3
+   │   │     each runner runs 3.4–3.11 with intra-topic fan-out
+   │   └─ ⟶ ORCHESTRATOR RETURNS TO USER (fire-and-forget)
+   ▼
+[user is free to do other work; team continues in background]
+   │
+   ▼
+[user] /youtube-content-workflow  (re-entry; same or future session)
+   │
+   ▼
+PHASE -1 ── detects in-flight run with topics in `Ready` ─▶ jumps to Phase 4
+   ▼
+PHASE 4 ── review gate  (sync, in main session)
+   │   ├─ show each Ready topic's assets
+   │   └─ user approves / regen / skip
+   ▼
+PHASE 5 ── upload via `uploader`  (sync, but uploads are sequential in main)
+   │   ├─ pre-flight assertions
+   │   ├─ uploader.upload + set_thumbnail + schedule_publish
+   │   ├─ post-upload verify + auto-fix
+   │   └─ Notion → Done, `state.json` step 5.x → done
+   ▼
+[final summary; team stays alive for next batch]
+```
+
+The team is **never deleted automatically**. Users can run `TeamDelete` manually if they want to wind down a channel team.
+
+---
+
+## PHASE -1 — Re-entry detection (run BEFORE Phase 0)
+
+Every invocation of this skill begins here. Goal: detect in-flight batches before re-doing Phase 0.
+
+### STEP -1.1 — Scan for active runs
+
+Use `Bash` (or `Glob`) to list `~/.claude/skills/youtube-content-workflow/state/runs/*/run.json`. For each, parse:
+
+- `run_id`, `team_name`, `channel_id`, `started_at`
+- `topics[]` with their current overall status: `pending`, `in_progress`, `ready_for_review`, `uploaded`, `failed`
+
+A run is **in-flight** if any topic has `state.json` with at least one step in `pending` or `in_progress`, OR has `status: ready_for_review` and no successful upload yet.
+
+Also call `TaskList` if a team context already exists in this session, to see assigned/open tasks owned by `researcher` / `topic-runner-*` / `uploader`.
+
+### STEP -1.2 — Branch on what's found
+
+| Found | Action |
+|---|---|
+| No in-flight runs | Continue to Phase 0 normally. |
+| Exactly 1 in-flight run, all topics `ready_for_review` | Skip ahead to Phase 4 for that run. |
+| Exactly 1 in-flight run, mixed states | `AskUserQuestion`: **Show status** (default — render a table per Phase -1.3) / **Continue (advance topics that are ready, leave others running)** / **Start a new batch alongside** (requires a different `{RUN_ID}` and may compete for team capacity) / **Cancel the run** (terminates topic-runners, marks run aborted; long-lived researcher/uploader stay alive). |
+| Multiple in-flight runs | Render a table summary (one row per run), then `AskUserQuestion` for which to continue / start new / cancel one. |
+
+### STEP -1.3 — Status rendering
+
+For each in-flight run, render:
+
+```
+🎬 Run {RUN_ID} — channel {CHANNEL_NAME} ({CHANNEL_PROFILE}) — started {RELATIVE_TIME}
+   Team: {TEAM_NAME}
+   Topics ({DONE}/{TOTAL} ready):
+   ┌─────────────────────────────────────────────────────────────────────────┐
+   │  # │ Topic                              │ Steps done │ Status             │
+   ├─────────────────────────────────────────────────────────────────────────┤
+   │  1 │ ...                                 │ 3.1–3.5     │ in_progress (3.6)  │
+   │  2 │ ...                                 │ 3.1–3.11    │ ready_for_review   │
+   │  3 │ ...                                 │ 3.1         │ failed at 3.4      │
+   └─────────────────────────────────────────────────────────────────────────┘
+```
+
+Read `state.json` for each topic. Step counts come from `Object.keys(steps).filter(k => steps[k].status === "done")`.
+
+If a topic is `failed`, surface the most recent entry from `errors[]` so the user can see why.
+
+> ⚠️ Cancel semantics: cancelling a run only stops `topic-runner-*` agents (via `SendMessage` with `{"type":"shutdown_request"}` to each). The long-lived `researcher` and `uploader` are NOT terminated — they'll be reused for the next batch. Use `TeamDelete` (manual) to fully wind down a channel team.
+
+---
+
+## PHASE 0 — Channel + team init
 
 ### STEP 0.1 — Probe required MCPs
 
@@ -75,9 +257,9 @@ without these because uploads/thumbnails/research would not be possible.
 
 ### STEP 0.2 — Pick a channel
 
-Call `{YT_LIST_CHANNELS}` to fetch the user's channels. For each channel, capture: `channel_id`, `display_name`.
+Call `{YT_LIST_CHANNELS}` to fetch the user's channels. For each channel, capture: `channel_id`, `display_name`, `profile_name`.
 
-Present the list to the user via `AskUserQuestion` (header: "Channel"). The user picks one. Store `{CHANNEL_ID}` and `{CHANNEL_NAME}`.
+Present the list to the user via `AskUserQuestion` (header: "Channel"). The user picks one. Store `{CHANNEL_ID}`, `{CHANNEL_NAME}`, `{CHANNEL_PROFILE}`.
 
 If the YouTube MCP returns zero channels, stop and surface the API response — do not invent a channel.
 
@@ -85,8 +267,8 @@ If the YouTube MCP returns zero channels, stop and surface the API response — 
 
 Try in order:
 
-1. **Local cache:** Check `~/.claude/skills/youtube-content-workflow/state/channels/{CHANNEL_ID}.json`. If it exists, parse it and store every field as `{CHANNEL_*}` variables. Skip to Phase 1.
-2. **Notion fallback:** Query Notion `YouTube Channels` DB filtered by `Channel ID = {CHANNEL_ID}`. If a row exists, hydrate `{CHANNEL_*}` from it, write the local cache file, and skip to Phase 1.
+1. **Local cache:** Check `~/.claude/skills/youtube-content-workflow/state/channels/{CHANNEL_ID}.json`. If it exists, parse it and store every field as `{CHANNEL_*}` variables. Skip to step 0.4.
+2. **Notion fallback:** Query Notion `YouTube Channels` DB filtered by `Channel ID = {CHANNEL_ID}`. If a row exists, hydrate `{CHANNEL_*}` from it, write the local cache file, and skip to step 0.4.
 
    Use `mcp__claude_ai_Notion__notion-search` with query `"YouTube Channels"` to find the database. Use `mcp__claude_ai_Notion__notion-fetch` for the data source ID. Then use `mcp__claude_ai_Notion__notion-query-database-view` filtering on `Channel ID`.
 3. **First-time setup wizard.** If neither cache nor Notion has this channel, run a wizard. Ask all four questions in **one** `AskUserQuestion` batch, plus a separate one for `Calendar DB`:
@@ -100,11 +282,12 @@ Try in order:
 
    Then a third `AskUserQuestion`: optional default CTA appended to all descriptions (free text or skip).
 
-After capturing, **echo all values back** to the user and ask for confirmation in a single message before saving:
+After capturing, **echo all values back** to the user and ask for confirmation before saving:
 
 ```
 About to save channel context:
   Channel        : {CHANNEL_NAME} ({CHANNEL_ID})
+  Profile        : {CHANNEL_PROFILE}
   Context        : {CHANNEL_CONTEXT}
   Tone           : {CHANNEL_TONE}
   Audience       : {CHANNEL_AUDIENCE}
@@ -118,17 +301,49 @@ Save to local cache + Notion?
 If the user confirms (`AskUserQuestion`: Yes / Edit one field / Cancel):
 
 - **Resolve `Calendar DB`:** if the user gave a name, search via `mcp__claude_ai_Notion__notion-search`; if multiple matches, present them with `AskUserQuestion`. Capture as `{CALENDAR_DB_ID}` (UUID).
-- **Resolve `Language code`:** map language → ISO 639-1 (Telugu→te, English→en, Hindi→hi, Tamil→ta, etc.). Store as `{CHANNEL_LANGUAGE_CODE}`.
+- **Resolve `Language code`:** map language → ISO 639-1 (Telugu→te, English→en, Hindi→hi, Tamil→ta, Kannada→kn, etc.). Store as `{CHANNEL_LANGUAGE_CODE}`.
 - **Write Notion row** in `YouTube Channels` DB via `mcp__claude_ai_Notion__notion-create-pages`. Capture the page ID as `{CHANNELS_DB_PAGE_ID}`.
-- **Write local cache** to `~/.claude/skills/youtube-content-workflow/state/channels/{CHANNEL_ID}.json` matching the `schemas/channel-state.example.json` shape.
-
-If the user picks "Edit one field," loop through the failing field with another `AskUserQuestion`, then re-confirm.
+- **Write local cache** to `~/.claude/skills/youtube-content-workflow/state/channels/{CHANNEL_ID}.json` matching `schemas/channel-state.example.json`.
 
 > ⚠️ If the `YouTube Channels` DB does not exist in Notion, surface the schema from `schemas/notion-databases.md` and ask the user to create it (do not auto-create).
 
+### STEP 0.4 — Create or attach to the channel team
+
+Compute `{TEAM_NAME} = "youtube-" + {CHANNEL_PROFILE}` (e.g., `youtube-svasti-kannada`).
+
+1. Check whether the team config exists at `~/.claude/teams/{TEAM_NAME}/config.json`.
+   - If it exists, parse the `members` array. The team is already set up.
+   - If not, call `TeamCreate` with `team_name={TEAM_NAME}` and `description="YouTube content pipeline for {CHANNEL_NAME}"`.
+
+2. After creation/attach, the orchestrator's session is now in the team's task-list namespace. All subsequent `TaskCreate` calls write to `~/.claude/tasks/{TEAM_NAME}/`.
+
+### STEP 0.5 — Ensure long-lived `researcher` and `uploader` are alive
+
+Read the team config's `members` array.
+
+- If a member with `name: "researcher"` exists and is not in `shutdown` state: skip.
+- Otherwise, spawn it:
+
+  ```
+  Agent({
+    description: "researcher for channel {CHANNEL_NAME}",
+    subagent_type: "general-purpose",
+    team_name: "{TEAM_NAME}",
+    name: "researcher",
+    run_in_background: true,
+    prompt: "<see Researcher role spec at end of this skill>"
+  })
+  ```
+
+  The researcher reads its initial context from the channel cache file path passed in the prompt and from the team's task list. It then goes idle waiting for SendMessage assignments.
+
+- Same for `uploader`: if missing, spawn with the Uploader role spec and `run_in_background: true`.
+
+Both must reach `idle` state before Phase 3 dispatch. If a long-lived agent fails to start, halt and surface the error — do not silently proceed without a researcher / uploader.
+
 ---
 
-## PHASE 1 — Read the content calendar
+## PHASE 1 — Calendar + upfront gates
 
 ### STEP 1.1 — Date range
 
@@ -142,36 +357,76 @@ Store `{DATE_FROM}` and `{DATE_TO}` (ISO `YYYY-MM-DD`).
 
 Query the Notion calendar DB for rows where `Channel == {CHANNEL_ID}` (by relation or select equality, depending on schema) AND `Publish Date BETWEEN {DATE_FROM} AND {DATE_TO}`.
 
-Use `mcp__claude_ai_Notion__notion-query-database-view` (or `notion-fetch` on the database with filter). If you cannot construct the filter, fall back to fetching all rows in the date range and filtering by channel client-side.
+For each row, extract: `topic` (Title field), `publish_date` (Date), `page_id` (Notion row ID), `existing_status`.
 
-For each row, extract:
+Store as `{TOPICS}`. Print a numbered list. Confirm with `AskUserQuestion`: proceed / drop a topic / abort.
 
-- `topic` (Title field)
-- `publish_date` (Date)
-- `page_id` (Notion row ID)
-- `existing_status` (Status select)
+If the query returns zero rows, **do not invent topics.** Ask: add to Notion / inline topics / abort. Never invent.
 
-Store as `{TOPICS}` — array of objects with these fields. Print a numbered list to the user. Confirm with `AskUserQuestion`: proceed / drop a topic / abort.
+> ⚠️ If a row's `existing_status` is `Scheduled` or `Done`, warn the user and offer to skip it.
 
-If the query returns zero rows, **do not invent topics.** Ask the user via `AskUserQuestion`:
+### STEP 1.3 — Collect all gates UPFRONT (so background work is uninterrupted)
 
-- Add entries to Notion now (then re-run Phase 1.2 after they confirm)
-- Provide topics inline as fallback (free-text — capture as `{TOPICS}` with no `page_id`)
-- Abort
+This is the critical change in v2.0. Before any Phase 3 work begins, the orchestrator must collect every user choice the team will need. The team **never asks the user mid-run**.
 
-> ⚠️ If a row's `existing_status` is already `Scheduled` or `Published`, warn the user and offer to skip it.
+In a single `AskUserQuestion` batch:
+
+1. **Privacy** — pick once for the whole batch: Private (default) / Unlisted. Public is never offered.
+2. **Publish slot strategy** — pick once:
+   - Use channel default time per row's date (read `publishing.default_publish_time_utc` from channel cache).
+   - Custom time of day (free text → e.g., `12:30Z` or `18:00 IST`); applied to each row's date.
+   - Per-topic custom (rare; expands into N follow-ups, one per topic).
+3. **Concurrency confirmation** (informational) — show: "Up to 3 topic-runners will run in parallel; the rest queue. NotebookLM and YouTube quotas are the bottleneck."
+4. **Notify on completion** — yes/no toggle. If yes, the orchestrator schedules a self-message via `ScheduleWakeup` after the team's projected ETA so re-entry is automatic.
+
+Compute per-topic `{PUBLISH_AT_UTC}` = `{topic.publish_date}T{publish_time_utc}Z`. Validate each is strictly in the future via `Bash: date -u +%s` comparison. If any topic's slot is in the past, ask once whether to (a) shift to next-day same time, (b) skip that topic, (c) abort.
+
+Capture `{PRIVACY}` and `{PUBLISH_AT_UTC}` per topic.
 
 ---
 
-## PHASE 2 — Title generation (parallel subagents)
+## PHASE 2 — Title generation (parallel within team)
 
-### STEP 2.1 — Spawn parallel title generators
+### STEP 2.1 — RUN_ID + run.json + per-topic state.json
 
-Generate a stable `{RUN_ID}` from current UTC timestamp + random suffix, e.g. `run-2026-04-30-a1b2c3`. Use Bash: `echo "run-$(date -u +%Y-%m-%d)-$(openssl rand -hex 3)"`.
+Generate `{RUN_ID}` via Bash: `echo "run-$(date -u +%Y-%m-%d)-$(openssl rand -hex 3)"`.
 
-Create the run directory: `~/.claude/skills/youtube-content-workflow/state/runs/{RUN_ID}/`.
+Create `~/.claude/skills/youtube-content-workflow/state/runs/{RUN_ID}/run.json`:
 
-For each topic in `{TOPICS}`, spawn an Agent subagent **in parallel** (single message, multiple `Agent` tool calls). Each subagent receives:
+```json
+{
+  "run_id": "{RUN_ID}",
+  "team_name": "{TEAM_NAME}",
+  "channel_id": "{CHANNEL_ID}",
+  "channel_profile": "{CHANNEL_PROFILE}",
+  "started_at": "<ISO>",
+  "privacy": "{PRIVACY}",
+  "concurrency_cap": 3,
+  "topics": [
+    {"topic_slug": "...", "topic": "...", "publish_at_utc": "...", "notion_page_id": "...", "status": "pending"}
+  ]
+}
+```
+
+For each topic, mkdir `<topic_dir>` and write a starter `state.json`:
+
+```json
+{
+  "run_id": "{RUN_ID}",
+  "topic_slug": "{TOPIC_SLUG}",
+  "channel_id": "{CHANNEL_ID}",
+  "team_name": "{TEAM_NAME}",
+  "started_at": "<ISO>",
+  "last_updated": "<ISO>",
+  "steps": {"2.1": {"status": "pending"}, "3.1": {"status": "pending"}, "...": "..."},
+  "errors": [],
+  "fanout_in_progress": []
+}
+```
+
+### STEP 2.2 — Spawn parallel title generators
+
+For each topic in `{TOPICS}`, spawn an `Agent` subagent **in parallel** in the team namespace (single message, multiple `Agent` tool calls). Each subagent receives the prompt below and writes to `<topic_dir>/titles.json`.
 
 ```
 You are generating 5 YouTube title candidates for a single topic. Return ONLY the
@@ -191,287 +446,219 @@ TOPIC
   {TOPIC}
   Publish date: {PUBLISH_DATE}
 
-TITLE GENERATION RULES
-  Apply the SUCCESS framework (Heath brothers, Made to Stick) — every title should
-  hit at least 3 of these 6:
-    Simple    — strip to one core promise
-    Unexpected — open a curiosity gap or break a pattern
-    Concrete  — specific, sensory, no abstract noun soup
-    Credible  — backed by authority, numbers, or social proof
-    Emotional — make the viewer feel something
-    Story     — implies a narrative arc
-
-  Plus YouTube SEO rules:
-    - Front-load the most-searched keyword.
-    - Aim for ≤60 characters when possible (mobile truncation).
-    - No misleading clickbait — the title must be truthful to the topic.
-    - Match the channel's language ({CHANNEL_LANGUAGE}) — do NOT translate.
-    - Match the channel's tone — copy patterns from RECENT VIDEOS where relevant.
-
-  Vary the 5 candidates: do not produce 5 paraphrases of the same hook. Aim for
-  different SUCCESS angles across the 5.
+[SUCCESS framework + YouTube SEO rules — see end of skill for the full reference.]
 
 OUTPUT FORMAT (return JSON only, no prose):
 {
   "topic": "{TOPIC}",
   "candidates": [
-    {"title": "...", "rationale": "<one line, e.g. 'Concrete + Emotional, 47 chars, keyword X up front'>"},
+    {"title": "...", "rationale": "<one line>"},
     ...5 entries
   ]
 }
 
-Save your JSON output to a file at:
-  ~/.claude/skills/youtube-content-workflow/state/runs/{RUN_ID}/<topic_slug>/titles.json
-where <topic_slug> = kebab-case of the topic, max 60 chars.
-
+Save your JSON output to: <topic_dir>/titles.json
 After saving, return ONLY the absolute file path you wrote.
 ```
 
-Wait for all subagents to finish. Read each `titles.json` and aggregate.
+Wait for all subagents to finish. Read each `titles.json`. Update each topic's `state.json` step `2.2` to `done`.
 
-### STEP 2.2 — User picks a title per topic
+### STEP 2.3 — User picks a title per topic
 
-For each topic, present its 5 candidates via `AskUserQuestion` (header: "Title"). Show all 5 with their one-line rationale. Allow the user to type a custom title via the implicit "Other" path.
+For each topic, present its 5 candidates via `AskUserQuestion` (header: "Title"). Allow custom via "Other".
 
-Capture `{TOPICS[i].final_title}`. Update each topic's Notion row (if `page_id` exists) via `mcp__claude_ai_Notion__notion-update-page` to set `Final Title = {final_title}` and `Status = Title Selected`.
+Capture `{TOPICS[i].final_title}`. Update Notion (if `page_id` exists): `Status = In progress`, `Final Title = {final_title}`.
 
-> ⚠️ If a topic has no `page_id` (came from inline fallback in Phase 1.2), skip the Notion update.
+Update `<topic_dir>/state.json`: step `2.3` → `done`, output `final_title`.
 
 ---
 
-## PHASE 3 — Heavy per-topic pipeline (parallel subagents)
+## PHASE 3 — Heavy pipeline (BACKGROUND, on the team)
 
-### STEP 3.0 — Spawn one subagent per topic
+This is where the team takes over. The orchestrator dispatches work and **returns to the user**. All gates were collected in Phase 1.3 and Phase 2.3 — the team needs nothing else.
 
-For each topic with a finalized title, spawn an Agent subagent **in parallel** (single message, multiple `Agent` tool calls). Each subagent runs all of 3.1–3.11 below for its single topic. Subagents inherit the channel bundle so they don't refetch.
+### STEP 3.0 — Dispatch plan
 
-Subagent prompt template:
+The orchestrator does the following before returning:
+
+1. For each topic, `TaskCreate` two tasks in the team task list:
+   - `research-{topic_slug}` (description: "Phase 3.1–3.3 for {topic}; assigned to researcher.") — owner = `researcher`.
+   - `topic-{topic_slug}` (description: "Phase 3.4–3.11 for {topic}; assigned to topic-runner-{topic_slug}.") — `addBlockedBy: [research-{topic_slug}]`.
+2. `SendMessage` to `researcher` for each `research-*` task with the topic context (final_title, topic_slug, run_id, topic_dir).
+3. Spawn the first 3 `topic-runner-{slug}` agents (cap = 3) with `run_in_background: true`. They start idle, claim their `topic-{slug}` task when its blocker resolves.
+4. As `topic-{slug}` tasks complete, the orchestrator (or any topic-runner) spawns the next queued runner — but the orchestrator may have already returned. To handle this without the orchestrator, the **researcher** also acts as a lightweight queue manager: after finishing each `research-*` task, it checks `TaskList` for queued `topic-*` tasks with no owner and spawns the next `topic-runner` up to the cap. (This is simpler than maintaining a separate scheduler agent.)
+
+### STEP 3.0.1 — Hand off and return to user
+
+After dispatch:
 
 ```
-You are running the heavy production pipeline for ONE YouTube video. Do every
-step in order. Verify each step's output before continuing. Save artifacts as
-specified. NEVER invent facts: use only what tools return.
+🚀 Run {RUN_ID} dispatched on team {TEAM_NAME}.
+   Topics queued: {N}   Concurrency cap: 3
+   Running first 3 topic-runners in background:
+     • topic-runner-{slug-1}
+     • topic-runner-{slug-2}
+     • topic-runner-{slug-3}
+   Queued: {N - 3}
 
-CHANNEL
-  ID         : {CHANNEL_ID}
-  Name       : {CHANNEL_NAME}
-  Language   : {CHANNEL_LANGUAGE}  (code: {CHANNEL_LANGUAGE_CODE})
-  Tone       : {CHANNEL_TONE}
-  Audience   : {CHANNEL_AUDIENCE}
-  Context    : {CHANNEL_CONTEXT}
-  Default CTA: {CHANNEL_DEFAULT_CTA}
+You can keep working. Re-run /youtube-content-workflow any time to see progress
+or to pick up Phase 4 review when topics reach `ready_for_review`.
 
-TOPIC
-  Topic        : {TOPIC}
-  Final title  : {FINAL_TITLE}
-  Publish date : {PUBLISH_DATE}
-  Notion page  : {NOTION_PAGE_ID}    ← may be null
-
-RUN
-  Run ID       : {RUN_ID}
-  Topic slug   : {TOPIC_SLUG}
-  Topic dir    : ~/.claude/skills/youtube-content-workflow/state/runs/{RUN_ID}/{TOPIC_SLUG}/
-
-TOOL BINDINGS (probed in Phase 0.1)
-  Image gen     : {IMG_GEN}
-  Transcribe    : {TRANSCRIBE}  (or "local-whisper" if falling back)
-
-[Steps 3.1–3.11 below — execute in order, save artifacts, return a JSON summary.]
+ETA: roughly {N * 12 / 3} minutes for video gen + research, plus per-topic post-processing.
 ```
 
-The subagent then runs steps 3.1–3.11.
+(Optional) If the user opted in to Phase 1.3 #4: call `ScheduleWakeup` with `delaySeconds = ETA_seconds + 600` and a re-entry prompt of `/youtube-content-workflow`.
 
-### STEP 3.1 — Create NotebookLM notebook
+The orchestrator's job for this invocation is now done. **Return.**
 
-Call `mcp__notebooklm-mcp__notebook_create` with title `{FINAL_TITLE}`.
+### STEP 3.1 — Researcher: create NotebookLM notebook
 
-Capture `{NOTEBOOK_ID}` and `{NOTEBOOKLM_URL}` from the response.
+Owned by `researcher`. For each `research-{topic_slug}` task:
 
-If the call fails: retry once after 30 seconds. If it fails twice, save what you have and surface the error to the orchestrator.
+1. Read the topic's `state.json`. If step `3.1` is `done`, skip to 3.2.
+2. Call `mcp__notebooklm-mcp__notebook_create` with title `{FINAL_TITLE}`. Capture `{NOTEBOOK_ID}` and `{NOTEBOOKLM_URL}`.
+3. Write step `3.1` → `done`, outputs `{notebook_id, notebooklm_url}` into `state.json`.
 
-### STEP 3.2 — Deep research (NOT fast)
+Retry once on failure with 30s delay. Two failures → write step `3.1` → `failed`, append to `errors[]`, mark task failed.
 
-Call `mcp__notebooklm-mcp__research_start` with:
+### STEP 3.2 — Researcher: deep research (NOT fast)
 
-- `query` = `"{FINAL_TITLE} {TOPIC}"`
-- `mode` = `"deep"` (must NOT be `"fast"` — verify the parameter name, the skill **requires** the deep research path)
-- `notebook_id` = `{NOTEBOOK_ID}` (if the tool accepts a target notebook; otherwise import in step 3.3)
+1. If step `3.2` is `done`, skip to 3.3.
+2. Call `mcp__notebooklm-mcp__research_start` with:
+   - `query` = `"{FINAL_TITLE} {TOPIC}"`
+   - `mode` = `"deep"` (must NOT be `"fast"`)
+   - `notebook_id` = `{NOTEBOOK_ID}` if accepted; else import in 3.3.
+3. Capture `{RESEARCH_ID}`. Write step `3.2` → `in_progress`, output `research_id`.
+4. Poll `mcp__notebooklm-mcp__research_status` every ~30s, cap 30 attempts (~15 min). Stop on `done` / `complete` / `succeeded`. On `failed`, retry the entire `research_start` once.
+5. On terminal success: write step `3.2` → `done`.
 
-Capture `{RESEARCH_ID}`.
+### STEP 3.3 — Researcher: import research as sources
 
-Poll `mcp__notebooklm-mcp__research_status` with `{RESEARCH_ID}` every ~30 seconds (use Bash `sleep 30` between polls). Cap at 30 attempts (≈15 minutes).
+1. If step `3.3` is `done`, skip to dispatch the topic-runner.
+2. Call `mcp__notebooklm-mcp__research_import` with `{RESEARCH_ID}` and `{NOTEBOOK_ID}`.
+3. Verify sources via `mcp__notebooklm-mcp__notebook_get` — `source_count > 0`. Retry once if zero.
+4. Write step `3.3` → `done`. Mark the `research-{topic_slug}` task complete.
+5. **Queue manager duty:** check `TaskList`. If any `topic-*` task has no owner and the in-flight `topic-runner-*` count is < 3, spawn the next `topic-runner-{slug}`.
 
-Stop polling when status is `done` / `complete` / `succeeded` (whichever the MCP returns). If `failed`, retry the entire research call once. If still failing, save state and notify the orchestrator.
+### STEP 3.4 — Topic-runner: video gen with intra-topic fan-out
 
-### STEP 3.3 — Import research as sources
+This is the per-topic `topic-runner-{slug}` agent. Its first action on spawn is to read `<topic_dir>/state.json`. Skip every step where `status == "done"`.
 
-Call `mcp__notebooklm-mcp__research_import` with `{RESEARCH_ID}` and `{NOTEBOOK_ID}`.
+**Pre-call checks (run in order):**
 
-Verify the notebook now has sources (call `mcp__notebooklm-mcp__source_list_drive` or `mcp__notebooklm-mcp__notebook_describe` to confirm source count > 0). If 0 sources, retry once; otherwise surface to orchestrator.
+1. **Verify auth is fresh.** If a prior MCP call returned `Authentication expired`, call `mcp__notebooklm-mcp__refresh_auth`. If still failing, `SendMessage` the orchestrator's idle inbox / write `errors[]` and halt — the user must run `! nlm login`.
+2. **Confirm sources.** Call `mcp__notebooklm-mcp__notebook_get` with `{NOTEBOOK_ID}` and verify `source_count > 0`. Sparse notebooks can fail silently — see error handling table.
 
-### STEP 3.4 — Generate Explainer video in channel language
+**Required parameters (MCP — primary path)**
 
-Use `mcp__notebooklm-mcp__studio_create` as the **primary** call. If the MCP fails (any of: returns `status: error`, returns success but the artifact reaches `status: failed` within ~60s, or returns `Could not retrieve notebook sources` with auth confirmed fresh), **fall back to the `nlm video create` CLI** — same parameters, more robust path. Both paths are documented below.
+| Param | Value |
+|---|---|
+| `notebook_id` | `{NOTEBOOK_ID}` |
+| `artifact_type` | `"video"` |
+| `video_format` | `"explainer"` |
+| `language` | `{CHANNEL_LANGUAGE_CODE}` — **BCP-47 code** (`kn`, `te`, `hi`, `en`, `ta`, `es`); NOT the English language name (`Kannada` ❌ → `kn` ✅) |
+| `confirm` | `true` |
 
-#### Pre-call checks (run in order — skipping these is the most common failure mode)
+Optional: `focus_prompt` (recommended whenever the notebook contains broad sources), `video_style_prompt`, `custom_prompt`, `source_ids`.
 
-1. **Verify auth is fresh.** If any prior MCP call in this session returned `Authentication expired`, call `mcp__notebooklm-mcp__refresh_auth` first. Note: `refresh_auth` only reloads cached tokens from disk — if the cached tokens are themselves stale, it returns `success` but auth is still broken. If a subsequent call still hits an auth error, ask the user to run `! nlm login` in the prompt to do browser-based re-auth, then call `refresh_auth` again. Do not attempt video generation while auth is expired — the call will fail with `Could not retrieve notebook sources`, which is a *misleading* downstream symptom of expired auth.
-2. **Confirm sources exist and match the topic.** Call `mcp__notebooklm-mcp__notebook_get` with `{NOTEBOOK_ID}` and verify `source_count > 0`. A notebook with zero sources will fail video generation with the same misleading sources error. **Sparsely-populated notebooks (e.g. ≤10 narrowly-focused sources from one research run) sometimes silently fail — even when sources are listed.** If you have access to a master notebook with broad relevant sources for the channel's domain, prefer it and use `focus_prompt` to constrain the narrative to the topic. If `source_count == 0`, halt — step 3.3 should have populated sources, so this indicates an upstream failure.
+Capture `artifact_id` as `{STUDIO_JOB_ID}`. Write step `3.4` → `in_progress`, output `studio_job_id`. Add `3.4` to `fanout_in_progress`.
 
-#### Required parameters (MCP — primary path)
+**🌟 FAN-OUT NOW (don't wait for video gen to finish):** As soon as the studio_create call returns the `artifact_id`, the topic-runner MUST spawn the following sub-tasks in **a single message with three `Agent` tool calls**:
 
-| Param | Value | Notes |
-|---|---|---|
-| `notebook_id` | `{NOTEBOOK_ID}` | UUID from step 3.1 (or master notebook per pre-call check #2) |
-| `artifact_type` | `"video"` | string literal — not `video_overview` or any alias |
-| `video_format` | `"explainer"` | do not omit — defaults are not safe to rely on |
-| `language` | `{CHANNEL_LANGUAGE_CODE}` — **BCP-47 code**, e.g. `"kn"` (Kannada), `"te"` (Telugu), `"hi"` (Hindi), `"en"` (English), `"ta"` (Tamil), `"es"` (Spanish) | The MCP expects the BCP-47 ISO code, NOT the full English-language name. Passing `"Kannada"` or `"Telugu"` causes the artifact to silently fail (status flips to `failed` within seconds, no error message). |
-| `confirm` | `true` | mandatory — the tool refuses to start generation without explicit confirmation |
+1. **3.7 description draft (skeleton)** — `Agent(subagent_type: "general-purpose", description: "Draft description from research", prompt: "...read sources from notebook {NOTEBOOK_ID}, draft Phase 3.7 description in {CHANNEL_LANGUAGE} based on research only (no transcript yet). Save to <topic_dir>/description.draft.txt. Return path.")`
+2. **3.8 thumbnail spec** — same shape, returns `<topic_dir>/thumbnail-spec.json`.
+3. **3.10 tags** — same shape, returns `<topic_dir>/tags.json`.
 
-#### Optional parameters
+When each returns: write its step to `done` in `state.json`, remove from `fanout_in_progress`.
 
-Only set these if the user explicitly requested them — otherwise omit and let NotebookLM defaults apply (exception: `focus_prompt` is recommended whenever using a broad master notebook, see pre-call check #2):
+**Polling (in parallel with the fan-out):** Use `Bash` with `run_in_background: true`:
 
-- `video_style_prompt` — string for visual-style guidance
-- `focus_prompt` — string to bias the narrative toward specific angles. **Use this whenever the notebook contains sources beyond the immediate topic** to keep the video on-topic.
-- `custom_prompt` — string for full prompt override
-- `source_ids` — array of source UUIDs to restrict generation to a subset (defaults to all sources)
+```
+until out=$(nlm studio status {NOTEBOOK_ID} 2>&1); \
+  echo "$out" | grep -A2 "{STUDIO_JOB_ID}" | grep -qE "completed|failed|error"; \
+  do sleep 90; done; \
+  echo "$out" | grep -A4 "{STUDIO_JOB_ID}"
+```
 
-#### CLI fallback (`nlm video create`) — use when MCP fails
+Cap at 20 attempts (~30 min). On `completed`: proceed to 3.5. On quick-fail (<60s, no error message): switch to `nlm video create` CLI fallback (see CLI fallback below) — do NOT retry blindly.
 
-If the MCP path errors out OR the artifact reaches `status: failed` quickly with no surfaced error, retry the same generation via the `nlm` CLI:
+**CLI fallback** (when MCP fails or quick-fails):
 
 ```
 nlm video create {NOTEBOOK_ID} \
   --format explainer \
   --language {CHANNEL_LANGUAGE_CODE} \
-  --focus "<focus_prompt — 1-3 sentences scoping the topic>" \
+  --focus "<focus_prompt — 1-3 sentences>" \
   --confirm
 ```
 
-Notes on the CLI path:
-- `--language` takes the same **BCP-47 code** as the MCP (`kn`, `te`, `hi`, etc.).
-- `--focus` is the equivalent of MCP `focus_prompt` and is strongly recommended on master notebooks.
-- The CLI prints `✓ Video generation started` followed by `Artifact ID: <uuid>` on success. Capture the UUID as `{STUDIO_JOB_ID}` and poll the same way as the MCP path.
-- The CLI uses the same auth tokens as the MCP — `nlm login` recovery applies to both.
-- **Why the CLI sometimes succeeds when the MCP fails:** the CLI's request shape and source-handling are slightly more permissive in practice. When you see a transient Google API error 8 or a sparse-notebook silent failure on the MCP, the CLI is the documented retry path.
+> ⚠️ **Language verification.** After download, spot-check the first 30 seconds of transcript (or the artifact title visible in `studio_status` — if the title is in English when the channel is Kannada, the language param did not take). If wrong-language: write step `3.4` → `failed`, halt the runner. Don't ship a wrong-language video.
 
-#### Expected success response shape (MCP)
+**🌟 As soon as 3.8 finishes (thumbnail-spec.json on disk):** spawn 3.9 image gen in parallel with the still-running video poll.
 
-```json
-{
-  "status": "success",
-  "artifact_type": "video",
-  "artifact_id": "<uuid>",
-  "artifact_status": "in_progress",
-  "message": "Video generation started.",
-  "notebook_url": "https://notebooklm.google.com/notebook/<notebook_id>"
-}
-```
+### STEP 3.5 — Topic-runner: download video
 
-Capture `artifact_id` as `{STUDIO_JOB_ID}` — required for polling and download (regardless of MCP vs CLI origin).
+1. If step `3.5` is `done`, skip.
+2. When 3.4 polling reports `completed`: call `mcp__notebooklm-mcp__download_artifact` with target `<topic_dir>/video.mp4`. **Note:** the download tool refuses to write to `~/.claude/...` — write to a sibling tree like `D:\projects\youtube-skill\runs\{RUN_ID}\{TOPIC_SLUG}\video.mp4` (or platform-equivalent).
+3. Verify via `Bash: test -s <path>`. Retry once if empty.
+4. Write step `3.5` → `done`. Output: `video_path`.
 
-#### Polling for completion
+**🌟 As soon as the file exists:** spawn 3.6 transcription in background.
 
-- Call `mcp__notebooklm-mcp__studio_status` with `notebook_id={NOTEBOOK_ID}` (or `nlm studio status {NOTEBOOK_ID}` from shell) to list all artifacts; find the entry matching `{STUDIO_JOB_ID}`.
-- For long polls (5–15 min for non-English explainers), use `Bash` with `run_in_background: true` and an `until` loop:
-  ```
-  until out=$(nlm studio status {NOTEBOOK_ID} 2>&1); \
-    echo "$out" | grep -A2 "{STUDIO_JOB_ID}" | grep -qE "completed|failed|error"; \
-    do sleep 90; done; \
-    echo "$out" | grep -A4 "{STUDIO_JOB_ID}"
-  ```
-  This emits a single completion notification when the artifact reaches a terminal state. Cap at 20 attempts (~30 min via timeout). Do not poll faster than every 30s.
-- Treat `status: "in_progress"` as expected. Only proceed to step 3.5 when status is `"completed"` (or equivalent terminal-success value) and a download URL is present.
-- **Quick-fail signal:** if the artifact reaches `status: failed` within ~60s of submission with no error message, that is the silent-failure pattern (usually a wrong language param or sparse-notebook source mismatch). Do not retry blindly — switch to the CLI fallback above with corrected params, or use a more populated notebook with `focus_prompt`.
-
-> ⚠️ **Language verification.** After download (step 3.5) and before description drafting (step 3.7), spot-check the first 30 seconds of the transcript: if `{CHANNEL_LANGUAGE}` is non-English and the transcript came back in English, the language param did not take. Halt and tell the user — do not proceed to publish a wrong-language video.
-
-### STEP 3.5 — Download video
-
-Call `mcp__notebooklm-mcp__download_artifact` with `artifact_type=video`, target = `~/.claude/skills/youtube-content-workflow/state/runs/{RUN_ID}/{TOPIC_SLUG}/video.mp4`.
-
-After the call, verify the file exists and is non-empty (`Bash: test -s <path> && stat -c %s <path>`). If the file is missing or empty, retry once. If still failing, surface to orchestrator.
-
-### STEP 3.6 — Transcribe
+### STEP 3.6 — Topic-runner: transcribe (background, optional refinement)
 
 Pick the transcription path **once**, in this priority:
 
-1. **Dedicated transcription MCP** (if `{TRANSCRIBE}` is set): call it with the video path, language=`{CHANNEL_LANGUAGE_CODE}`. Save the transcript text.
-2. **NotebookLM transcript field**: re-call `mcp__notebooklm-mcp__studio_status` with `{STUDIO_JOB_ID}`. If the response has a `transcript` (or `captions`/`subtitles`) field, use it.
-3. **Local whisper fallback**: shell out via `Bash`:
+1. **Dedicated transcription MCP** if `{TRANSCRIBE}` is set: call with `language={CHANNEL_LANGUAGE_CODE}`.
+2. **NotebookLM transcript field**: re-call `mcp__notebooklm-mcp__studio_status` — if the response has a `transcript` / `captions` / `subtitles` field, use it.
+3. **Local whisper**:
    ```
-   whisper "<topic_dir>/video.mp4" \
-     --language {CHANNEL_LANGUAGE_CODE} \
-     --output_format txt \
-     --output_dir "<topic_dir>"
+   whisper "<topic_dir>/video.mp4" --language {CHANNEL_LANGUAGE_CODE} \
+     --output_format txt --output_dir "<topic_dir>"
    ```
-   The output file will be `<topic_dir>/video.txt`. Rename it to `transcript.txt`.
+   Rename `video.txt` → `transcript.txt`.
 
-If all three paths fail, ask the user (via the orchestrator) how to proceed — do not fake a transcript.
+If all three paths fail: write step `3.6` → `skipped` (NOT failed); the description from 3.7 is research-derived and remains valid. Do not block on this.
 
-Save the final transcript at `<topic_dir>/transcript.txt`. Store its content as `{TRANSCRIPT}`.
+If transcription succeeds within ~5 min and 3.7 is `done`: spawn a refinement Agent that reads `description.draft.txt` + `transcript.txt` and writes the final `description.txt`. If transcription lands too late, ship the draft.
 
-### STEP 3.7 — Draft the description
+### STEP 3.7 — Description (started in fan-out at 3.4; refined post-3.6)
 
-Compose a YouTube description in `{CHANNEL_LANGUAGE}` that:
+The skeleton draft (`description.draft.txt`) is written during the fan-out spawned at 3.4, using only research sources. Format: hook (1–2 lines, ≤120 chars), body (2–3 short paragraphs), placeholder timestamps, hashtags, CTA. Language = `{CHANNEL_LANGUAGE}`.
 
-- **Hook (lines 1–2):** the most compelling one-liner that fits above YouTube's "Show more" fold (~120 chars). Pulls from the title and transcript opening.
-- **Body (2–3 short paragraphs):** summary of what the video covers, drawn directly from the transcript. Cite specific points the video actually makes — do not invent claims.
-- **Timestamps:** if the transcript has natural section breaks (>30 seconds with topic shifts), generate 3–6 timestamps in `MM:SS — Section title` format. Skip if the transcript is short.
-- **Hashtags:** 3–5 relevant hashtags at the bottom.
-- **CTA:** append `{CHANNEL_DEFAULT_CTA}` if set.
+Post-3.6, if a transcript exists: refine the description with concrete timestamps and direct quotes/paraphrase from the transcript. Write final `<topic_dir>/description.txt`. Step `3.7` → `done`.
 
-Write to `<topic_dir>/description.txt`. Store as `{DESCRIPTION}`.
+If 3.6 was skipped: rename `description.draft.txt` → `description.txt`. Step `3.7` → `done` (with note that no transcript-derived refinement was applied).
 
-> Constraint: the description must be in `{CHANNEL_LANGUAGE}`. No silent translation.
+### STEP 3.8 — Thumbnail spec (in fan-out at 3.4)
 
-### STEP 3.8 — Build thumbnail spec
+Two artifacts:
 
-Generate two artifacts:
+- `{THUMBNAIL_TEXT}` — 2–5 word overlay text in `{CHANNEL_LANGUAGE}`, mobile-readable, channel tone.
+- `{THUMBNAIL_IMAGE_PROMPT}` — single combined prompt covering both visual scene AND rendered text overlay. Modern image models (Nano Banana Pro / Gemini 3 Pro Image) render text reliably when specified explicitly.
 
-- `{THUMBNAIL_TEXT}` — 2–5 word overlay text, in `{CHANNEL_LANGUAGE}`, optimized for mobile readability (high contrast, big-feeling words). Match channel tone.
-- `{THUMBNAIL_IMAGE_PROMPT}` — a single combined prompt that describes **both the visual scene and the rendered text overlay**, so the image model produces a finished thumbnail in one shot. Modern models (Nano Banana Pro / Gemini 3 Pro Image) render text reliably when it's specified explicitly. The prompt must include:
+  Visual: channel vibe (use tone + context for palette/mood), click-curiosity composition, focal subject, foreground/background separation, **deliberate negative space where text will sit**, 16:9.
 
-  **Visual section:**
-  - Channel vibe (use `{CHANNEL_TONE}` and `{CHANNEL_CONTEXT}` to inform palette, mood, style).
-  - Click-curiosity composition: clear focal subject, expressive face if relevant, strong foreground/background separation, leave deliberate negative space where the text will sit.
-  - Concrete reference to the title's core idea.
-  - Aspect ratio: 16:9.
+  Text: exact string `"{THUMBNAIL_TEXT}"`, language/script declared (e.g., "Telugu script", "Devanagari", "Kannada script"), placement (e.g., "bottom-right third"), bold sans-serif heavy weight ~12–15% frame height, contrast treatment (white fill + dark drop shadow OR dark fill on bright pill), spelling guard ("render exactly as written, no substitutions").
 
-  **Text section** (inline in the same prompt):
-  - The exact string to render: `"{THUMBNAIL_TEXT}"`, in `{CHANNEL_LANGUAGE}` (specify the script — e.g. "Telugu script", "Devanagari", "Latin").
-  - Placement (e.g. "bottom-left third", "upper right corner") — must not overlap the focal subject.
-  - Style: bold sans-serif, heavy weight, large enough to read on a phone (~12–15% of frame height).
-  - Contrast treatment: white fill with dark drop shadow OR dark fill on a bright pill — pick whichever the visual demands.
-  - Spelling: "render the text exactly as written, no substitutions" (this guard matters for non-Latin scripts).
+Save `<topic_dir>/thumbnail-spec.json`:
 
-Example combined prompt shape:
-```
-A {visual scene description, palette, mood, focal subject, composition, negative space for text}.
-16:9 aspect ratio. Overlay the text "{THUMBNAIL_TEXT}" in {language/script}, bold sans-serif,
-{placement}, {contrast treatment}. Render the text exactly as written.
-```
-
-Save both to `<topic_dir>/thumbnail-spec.json`:
 ```json
 { "text": "{THUMBNAIL_TEXT}", "image_prompt": "{THUMBNAIL_IMAGE_PROMPT}" }
 ```
 
-### STEP 3.9 — Generate thumbnail image
+### STEP 3.9 — Thumbnail image (kicked off as soon as 3.8 finishes; runs during 3.4 poll)
 
-Call `{IMG_GEN}` with `{THUMBNAIL_IMAGE_PROMPT}` (which already includes the text overlay instructions from 3.8). Aspect ratio: 16:9 (1280×720 minimum). Save the result directly to `<topic_dir>/thumbnail.png`.
+Call `{IMG_GEN}` with `{THUMBNAIL_IMAGE_PROMPT}`. Aspect ratio 16:9 (1280×720 minimum). Save to `<topic_dir>/thumbnail.png`.
 
-**Verify the rendered text.** Open the generated image and confirm `{THUMBNAIL_TEXT}` is present, spelled correctly, and legible. If the model garbled the text (common signs: dropped/added characters, wrong script, glyphs that don't match `{CHANNEL_LANGUAGE}`), regenerate **once** with a stronger spelling guard appended to the prompt:
+**Verify the rendered text.** Open the image (Read tool) and confirm `{THUMBNAIL_TEXT}` is present, spelled correctly, legible. If garbled (dropped/added characters, wrong script): regenerate **once** with a stronger spelling guard appended:
 
 ```
 The text must read exactly: "{THUMBNAIL_TEXT}". Do not paraphrase, translate, or
 substitute characters. {CHANNEL_LANGUAGE} script only.
 ```
 
-If the second attempt is still wrong, fall back to the Pillow composite path: save the model output as `<topic_dir>/thumbnail-base.png` (no text), then overlay `{THUMBNAIL_TEXT}` programmatically using the script below.
-
-**Pillow fallback (only when model text rendering fails twice):**
+If still wrong: fall back to the Pillow composite path. Save the model output as `<topic_dir>/thumbnail-base.png`, overlay `{THUMBNAIL_TEXT}` programmatically:
 
 ```
 python -c "
@@ -484,22 +671,19 @@ out  = sys.argv[3]
 
 draw = ImageDraw.Draw(base)
 W, H = base.size
-# Big, bold, centered. Try a system font; fall back to default.
 try:
     font = ImageFont.truetype('arialbd.ttf', size=int(H * 0.13))
 except OSError:
     font = ImageFont.load_default()
 
-# Wrap to ~ 18 chars per line.
 lines = textwrap.wrap(text, width=18)
 total_h = sum(font.getbbox(l)[3] - font.getbbox(l)[1] for l in lines) + (len(lines)-1)*10
-y = H - total_h - int(H*0.06)  # bottom-anchored with margin
+y = H - total_h - int(H*0.06)
 
 for line in lines:
     bbox = draw.textbbox((0,0), line, font=font)
     w = bbox[2] - bbox[0]
     x = (W - w) // 2
-    # Drop shadow
     draw.text((x+4, y+4), line, font=font, fill=(0,0,0,200))
     draw.text((x, y),     line, font=font, fill=(255,255,255,255))
     y += (bbox[3]-bbox[1]) + 10
@@ -509,23 +693,25 @@ print(out)
 " "<topic_dir>/thumbnail-base.png" "{THUMBNAIL_TEXT}" "<topic_dir>/thumbnail.png"
 ```
 
-Verify `<topic_dir>/thumbnail.png` exists and is >5KB.
+Verify >5KB. Step `3.9` → `done`.
 
-> ⚠️ If Pillow isn't installed, skip the composite and use `thumbnail-base.png` as `thumbnail.png`. Tell the orchestrator the overlay was not applied so the user can decide.
+> ⚠️ If Pillow isn't installed, ship `thumbnail-base.png` as `thumbnail.png` and append a note to `state.json` `errors[]`: `"thumbnail overlay skipped — Pillow missing"`. The reviewer can decide.
 
-### STEP 3.10 — Generate tags
+### STEP 3.10 — Tags (in fan-out at 3.4)
 
-Generate 10–15 YouTube tags. Each tag must be derivable from the title, description, transcript, topic, or channel context — **no fabricated brand or off-topic tags.**
+10–15 YouTube tags. Each tag must be derivable from the title, description draft, topic, or channel context — no fabricated brand or off-topic tags.
 
 Mix:
 - 2–3 broad / high-volume topical tags
-- 4–6 specific long-tail tags from the transcript
-- 1–2 channel-specific tags (e.g. `{CHANNEL_NAME}`)
+- 4–6 specific long-tail tags (from research / transcript when available)
+- 1–2 channel-specific tags
 - 1–2 language tags (e.g. `Telugu`, `te`)
 
-Save to `<topic_dir>/tags.json` as a JSON array of strings. Store as `{TAGS}`.
+Save `<topic_dir>/tags.json`. Step `3.10` → `done`. Post-3.6, optionally refine with tags surfaced from the transcript.
 
-### STEP 3.11 — Persist artifacts and update Notion
+### STEP 3.11 — Persist + Notion update + mark topic ready
+
+Wait until all of: 3.4 (`done`), 3.5 (`done`), 3.6 (`done` or `skipped`), 3.7 (`done`), 3.8 (`done`), 3.9 (`done`), 3.10 (`done`).
 
 Write `<topic_dir>/metadata.json`:
 
@@ -539,203 +725,264 @@ Write `<topic_dir>/metadata.json`:
   "language": "{CHANNEL_LANGUAGE}",
   "language_code": "{CHANNEL_LANGUAGE_CODE}",
   "final_title": "{FINAL_TITLE}",
-  "publish_date": "{PUBLISH_DATE}",
+  "publish_at_utc": "{PUBLISH_AT_UTC}",
   "notebooklm_url": "{NOTEBOOKLM_URL}",
   "notebook_id": "{NOTEBOOK_ID}",
-  "video_path": "<topic_dir>/video.mp4",
-  "thumbnail_path": "<topic_dir>/thumbnail.png",
-  "transcript_path": "<topic_dir>/transcript.txt",
-  "description_path": "<topic_dir>/description.txt",
+  "video_path": "...",
+  "thumbnail_path": "...",
+  "transcript_path": "..." | null,
+  "description_path": "...",
   "tags": [...],
   "notion_page_id": "{NOTION_PAGE_ID}"
 }
 ```
 
-Update the Notion calendar row (if `{NOTION_PAGE_ID}` is set) via `mcp__claude_ai_Notion__notion-update-page`:
+Update Notion (if `{NOTION_PAGE_ID}` is set): `Status = Ready`, `notebooklm = {NOTEBOOKLM_URL}`.
 
-- `NotebookLM URL` = `{NOTEBOOKLM_URL}`
-- `Status` = `Ready`
+Update `<topic_dir>/state.json`: step `3.11` → `done`, top-level `status: "ready_for_review"`. Update `run.json`'s topic entry to `status: "ready_for_review"`.
 
-Return the absolute path to `metadata.json` to the orchestrator.
+Mark the `topic-{slug}` task complete via `TaskUpdate`. The topic-runner sends its final SendMessage to the orchestrator's idle inbox: `"topic {topic_slug} ready for review"`, then auto-shuts-down after one idle cycle.
 
----
-
-### STEP 3.X — Orchestrator: collect subagent results
-
-After all subagents finish, read every `metadata.json` and verify each topic has: `video.mp4`, `thumbnail.png`, `transcript.txt`, `description.txt`, `tags.json`, all on disk. Topics with missing artifacts are flagged and presented to the user before Phase 4.
+**Capacity hand-off:** when the topic-runner's task completes, the **researcher** (acting as queue manager per 3.3) checks `TaskList` for the next queued `topic-*` task with no owner and spawns the next `topic-runner-{slug}` if any are queued, keeping the in-flight count at 3.
 
 ---
 
-## PHASE 4 — Review gate (interactive batch)
+## PHASE 4 — Review gate (re-entry)
+
+Triggered when the user re-runs `/youtube-content-workflow` and Phase -1 detects topics in `ready_for_review`. The orchestrator runs Phase 4 in the main session (gates require user input).
 
 ### STEP 4.1 — Show each topic's assets
 
-For each topic, render a summary block to the user:
+For each ready topic, render:
 
 ```
 📹 Topic {i}/{N}: {TOPIC}
    Title          : {FINAL_TITLE}
-   Publish date   : {PUBLISH_DATE}
+   Publish at     : {PUBLISH_AT_UTC}
    Language       : {CHANNEL_LANGUAGE}
-   Video          : <topic_dir>/video.mp4  ({size_mb} MB, {duration})
-   Thumbnail      : <topic_dir>/thumbnail.png
-   Description    : (first 3 lines)
-                    {description_preview}
-   Tags ({n})     : {tags_csv}
+   Video          : {video_path} ({size_mb} MB, {duration})
+   Thumbnail      : {thumbnail_path}
+   Description    : {first 3 lines of description.txt}
+   Tags ({n})     : {comma-separated}
    NotebookLM     : {NOTEBOOKLM_URL}
 ```
 
-Open the thumbnail PNG with the `Read` tool so the image renders inline for the user.
+Open the thumbnail PNG with the `Read` tool so the image renders inline.
 
 ### STEP 4.2 — Per-topic approval
 
 For each topic, ask via `AskUserQuestion` (header: "Topic {i}"):
 
 - **Approve as-is** — proceed to upload with current assets
-- **Regenerate thumbnail** — re-run step 3.9 only (optionally re-run 3.8 if the user wants a new prompt)
-- **Regenerate description** — re-run step 3.7 only
-- **Edit a field manually** — user types corrections (title / description / tags overlay text), apply directly without LLM regen
-- **Skip this topic** — don't upload
+- **Regenerate thumbnail** — `SendMessage` `topic-runner-{slug}` to re-run 3.9 (and optionally 3.8)
+- **Regenerate description** — re-run 3.7
+- **Edit a field manually** — user types corrections
+- **Skip this topic** — don't upload (mark `state.json` top-level `status: "skipped"`)
 
-Re-render the summary after any change and re-ask until the user approves or skips.
+If a regeneration is requested, the orchestrator re-spawns a fresh `topic-runner-{slug}` (the old one terminated at 3.11) with `state.json` already pointing the relevant step back to `pending`.
 
-### STEP 4.3 — Privacy
+### STEP 4.3 — Confirm batch
 
-Once all topics are approved, ask `AskUserQuestion` (header: "Privacy"):
+After per-topic approvals, show a final summary list and confirm: **Send to uploader** / **Cancel**.
 
-- **Private (recommended)** — only you can see; default
-- **Unlisted** — anyone with the link
-
-**No `Public` option is presented.** If the user types `public` anyway, refuse politely:
-
-```
-I can't set videos to public via this skill — that's a hard guardrail.
-Please pick private or unlisted, or set public manually in YouTube Studio after review.
-```
-
-Store `{PRIVACY}`.
+`{PRIVACY}` was captured upfront in Phase 1.3 — no re-prompt unless the user changes it now.
 
 ---
 
-## PHASE 5 — Schedule upload
+## PHASE 5 — Upload via `uploader`
 
-### STEP 5.1 — Pre-flight assertion
+Owned by the long-lived `uploader` agent. The orchestrator dispatches via `SendMessage` and a `TaskCreate` per approved topic.
 
-Before any upload call, assert all of the following for every approved topic. If any fails, halt and tell the user:
+### STEP 5.1 — Pre-flight assertion (uploader)
 
-- `{PRIVACY}` is `private` or `unlisted` — never `public`
-- `video.mp4` exists and is non-empty
-- `thumbnail.png` exists and is non-empty
-- `tags.json` parses to a non-empty array
-- `description.txt` exists and is non-empty
-- `{PUBLISH_DATE}` parses to a date strictly in the future (use `Bash: date -d "{PUBLISH_DATE}" +%s` and compare to `date +%s`)
+For each approved topic, the uploader asserts:
 
-### STEP 5.2 — Upload
+- `{PRIVACY}` ∈ `{private, unlisted}` — never `public`
+- `video.mp4` exists, non-empty
+- `thumbnail.png` exists, non-empty
+- `tags.json` parses to non-empty array
+- `description.txt` non-empty
+- `{PUBLISH_AT_UTC}` strictly in the future (re-check; users may have re-entered hours/days later)
 
-Call `{YT_UPLOAD}` per approved topic. Inputs (the exact parameter names depend on the YouTube MCP — adapt at runtime):
+Any failure: `SendMessage` orchestrator with the specific check, halt for that topic.
 
-- `channel_id` = `{CHANNEL_ID}`
-- `video_path` = `<topic_dir>/video.mp4`
-- `title` = `{FINAL_TITLE}`
-- `description` = contents of `<topic_dir>/description.txt`
-- `tags` = parsed `<topic_dir>/tags.json`
-- `thumbnail_path` = `<topic_dir>/thumbnail.png`
-- `privacy` = `{PRIVACY}`
-- `publish_at` = `{PUBLISH_DATE}` in RFC3339 (e.g. `2026-05-15T09:00:00Z`)
-- `default_language` = `{CHANNEL_LANGUAGE_CODE}`
+### STEP 5.2 — Upload (sequential within uploader)
 
-If the YouTube MCP supports concurrent uploads, run all uploads in parallel via `Agent` subagents. Otherwise, sequential.
+Uploads run sequentially, not in parallel — YouTube quota and rate limits make concurrent uploads risky. The uploader processes the queue one at a time.
 
-For each upload, capture `{YOUTUBE_VIDEO_ID}` from the response. If a call returns an error, do **not** retry blindly (could cause double-uploads) — surface the error and ask the user.
+For each:
 
-### STEP 5.3 — Update Notion
+```
+mcp__maagpi-youtube-mcp__youtube_video_upload({
+  channel: {CHANNEL_PROFILE},
+  filePath: video.mp4,
+  title: {FINAL_TITLE},
+  description: <description.txt contents>,
+  tags: <tags.json parsed>,
+  thumbnailPath: thumbnail.png,
+  privacyStatus: {PRIVACY},
+  language: {CHANNEL_LANGUAGE_CODE},
+  notifySubscribers: true
+})
+```
 
-For each successfully uploaded topic with a `{NOTION_PAGE_ID}`, update via `mcp__claude_ai_Notion__notion-update-page`:
+Capture `{YOUTUBE_VIDEO_ID}` from response. Write `state.json` step `5.2` → `done`, output `youtube_video_id`. Do **not** retry on error — surface to orchestrator (avoid double-uploads).
 
-- `Status` = `Scheduled`
-- `YouTube Video ID` = `{YOUTUBE_VIDEO_ID}`
+### STEP 5.3 — Set thumbnail + verify
 
-### STEP 5.4 — Post-upload verification + auto-fix
+Call `mcp__maagpi-youtube-mcp__youtube_video_set_thumbnail` with the ID and thumbnail path. If `PERMISSION_DENIED`: surface as MANUAL FIX (channel needs phone verification at https://www.youtube.com/verify).
 
-The upload response is not authoritative — re-fetch each video from YouTube and compare against what we sent. This catches silent drops (tags exceeding length cap, thumbnail upload failing, scheduled time wrong timezone, default language not applied) and the most dangerous failure mode: a video that ended up `public`.
+### STEP 5.4 — Post-upload verify + auto-fix
 
-For each `{YOUTUBE_VIDEO_ID}`, probe the YouTube MCP for a "get video" tool via `ToolSearch` with `"youtube video get"` (likely `mcp__maagpi-youtube-mcp__youtube_video_get`). Bind as `{YT_GET_VIDEO}`. Call it with the video ID requesting `snippet,status,localizations` (or whatever the tool exposes).
+The upload response is not authoritative. Re-fetch via `mcp__maagpi-youtube-mcp__youtube_video_get` with `parts: ["snippet", "status", "contentDetails"]`. Compare against source of truth:
 
-Compare each field against the source of truth and record mismatches:
-
-| Field | Source of truth | Severity if mismatched |
+| Field | Source | Severity if mismatched |
 |---|---|---|
 | `privacyStatus` | `{PRIVACY}` (must be `private` or `unlisted`) | **CRITICAL** — public must be flipped immediately |
-| `publishAt` (or `scheduledPublishTime`) | `{PUBLISH_DATE}` in RFC3339 UTC | high |
-| `title` | `{FINAL_TITLE}` (exact match) | high |
-| `description` | contents of `<topic_dir>/description.txt` | medium |
-| `tags` | array from `<topic_dir>/tags.json` | medium |
-| `thumbnail` (custom thumbnail set?) | `<topic_dir>/thumbnail.png` was uploaded | high |
-| `defaultLanguage` / `defaultAudioLanguage` | `{CHANNEL_LANGUAGE_CODE}` | low |
+| `publishAt` | `{PUBLISH_AT_UTC}` (≤60s drift OK) | high |
+| `title` | `{FINAL_TITLE}` (exact) | high |
+| `description` | `description.txt` | medium |
+| `tags` | `tags.json` array (YouTube silently drops over 500-char string) | medium |
+| `hasCustomThumbnail` | should be `true` | high |
+| `defaultLanguage` | `{CHANNEL_LANGUAGE_CODE}` | low |
 
-**For tags**, YouTube enforces a 500-char total tag-string cap and silently drops the overflow. Verify the returned tag list contains every tag we sent; if any are missing, that's a mismatch.
+**Auto-fix per field:**
 
-**For thumbnail**, the get response usually exposes `thumbnails.maxres.url` (or `default.url`) — if it points to an auto-generated frame instead of the custom upload, treat as missing.
-
-**For `publishAt`**, allow ≤60s drift to absorb timezone/RFC3339 formatting quirks; anything larger is a real mismatch.
-
-**Auto-fix per field** — call the most specific tool available, in this priority:
-
-| Field mismatched | Fix call |
+| Mismatched | Fix call |
 |---|---|
-| `privacyStatus` is `public` | **Immediately** call `mcp__maagpi-youtube-mcp__youtube_video_set_privacy` with `{PRIVACY}`. Do this before any other fix. |
-| `privacyStatus` is wrong but not public | `youtube_video_set_privacy` |
-| `publishAt` mismatch | `mcp__maagpi-youtube-mcp__youtube_video_schedule_publish` with the correct RFC3339 |
-| `thumbnail` mismatch | `mcp__maagpi-youtube-mcp__youtube_video_set_thumbnail` with `<topic_dir>/thumbnail.png` |
-| `title` / `description` / `tags` / `defaultLanguage` mismatch | `mcp__maagpi-youtube-mcp__youtube_video_update` with the corrected fields |
+| `privacyStatus` is `public` | **Immediately** `youtube_video_set_privacy` to `{PRIVACY}`. Before any other fix. |
+| `privacyStatus` wrong (not public) | `youtube_video_set_privacy` |
+| `publishAt` mismatch | `youtube_video_schedule_publish` with correct RFC3339, `privacyStatus: private` (so it doesn't auto-flip to public) |
+| `hasCustomThumbnail` false | `youtube_video_set_thumbnail` (handle PERMISSION_DENIED → MANUAL FIX) |
+| `title` / `description` / `tags` / `defaultLanguage` | `youtube_video_update` with the corrected fields |
 
-Each fix call: cap retries at 1. If a fix fails twice, surface the specific field + error to the user — do not silently leave a public video live.
+Cap retries at 1 per fix. After fixes, re-fetch once. Persistent mismatches → MANUAL FIX flag in summary.
 
-After fixes, **re-fetch the video once** to confirm every previously-mismatched field is now correct. If any field still mismatches after the fix attempt, flag that topic in the final summary as `⚠️ NEEDS MANUAL FIX` with the field name and current YouTube value.
+Save `<topic_dir>/verify.json` (see Phase 5 schema in repo). Write step `5.4` → `done`. Update Notion: `Status = Done`, `Notes` includes YouTube URL, video ID, edit URL, and any MANUAL FIX flags.
 
-Save the verification report to `<topic_dir>/verify.json`:
+> ⚠️ **Hard guardrail.** If verify finds a video `public`, flip it immediately. Continue verifying. Even if the user later wants public, this skill never leaves a video public — they flip it manually in Studio.
 
-```json
-{
-  "video_id": "{YOUTUBE_VIDEO_ID}",
-  "checked_at": "<ISO timestamp>",
-  "fields": [
-    {"field": "privacyStatus", "expected": "private", "actual": "private", "ok": true},
-    {"field": "publishAt", "expected": "...", "actual": "...", "ok": true},
-    ...
-  ],
-  "fixes_applied": [
-    {"field": "thumbnail", "tool": "youtube_video_set_thumbnail", "result": "ok"}
-  ],
-  "manual_fix_needed": []
-}
-```
-
-If concurrency-safe, verify all topics in parallel via `Agent` subagents (one per `{YOUTUBE_VIDEO_ID}`); otherwise sequential.
-
-> ⚠️ **Hard guardrail.** If any video is found `public`, flip it to `{PRIVACY}` first, then complete the rest of the verification. Even if the user later wants public, this skill never leaves a video public — they must flip it manually in YouTube Studio.
-
-### STEP 5.5 — Final summary
-
-Print to the user:
+### STEP 5.5 — Final summary (orchestrator, after uploader signals done)
 
 ```
-✅ YouTube workflow complete for run {RUN_ID}.
+✅ Run {RUN_ID} complete on team {TEAM_NAME}.
 
 | # | Topic | Title | Scheduled | Privacy | Verified | YouTube | Notion |
 |---|---|---|---|---|---|---|---|
-| 1 | ... | ... | YYYY-MM-DD HH:MM | private | ✅ all fields match | https://youtu.be/... | https://www.notion.so/... |
+| 1 | ... | ... | YYYY-MM-DD HH:MM | private | ✅ all match | https://youtu.be/... | https://www.notion.so/... |
 | 2 | ... | ... |  ...  | ...  | 🔧 fixed: thumbnail | ...  | ...  |
-| 3 | ... | ... |  ...  | ...  | ⚠️ NEEDS MANUAL FIX: tags | ...  | ...  |
+| 3 | ... | ... |  ...  | ...  | ⚠️ MANUAL FIX: thumbnail (channel not phone-verified) | ...  | ...  |
 
-📁 Artifacts: ~/.claude/skills/youtube-content-workflow/state/runs/{RUN_ID}/
+📁 Artifacts: <run_dir>/
    Per-topic verify reports: <topic_dir>/verify.json
+   Per-topic state:           <topic_dir>/state.json
 
 Reminder: all videos are scheduled as {PRIVACY}. Flip to public manually in YouTube
 Studio after you've watched the final cut.
+
+Team {TEAM_NAME} stays alive for the next batch. Run /youtube-content-workflow any
+time to start a new run; no team setup needed.
 ```
 
-If any topic shows `⚠️ NEEDS MANUAL FIX`, list each one explicitly below the table with the field, the expected value, the actual YouTube value, and a direct link to the video's edit page in YouTube Studio.
+If any topic shows MANUAL FIX, list each one explicitly with field, expected, actual, and a direct link to the video's Studio edit page.
+
+---
+
+## Role specs (used in Agent prompts at Phase 0.5 and 3.0)
+
+### Researcher role spec
+
+```
+You are the `researcher` for team {TEAM_NAME}, channel {CHANNEL_NAME}.
+
+LIFETIME: long-lived. You stay alive across batches. Go idle between assignments.
+
+CONTEXT FILES (read these on first wake):
+  - Channel cache: ~/.claude/skills/youtube-content-workflow/state/channels/{CHANNEL_ID}.json
+  - Team config:   ~/.claude/teams/{TEAM_NAME}/config.json
+  - Active runs:   ~/.claude/skills/youtube-content-workflow/state/runs/
+
+DUTIES:
+  1. Phase 3.1–3.3 for each `research-{topic_slug}` task assigned to you.
+     - notebook_create → research_start mode=deep → poll research_status → research_import
+     - Verify source_count > 0 after import.
+     - Write step status into <topic_dir>/state.json after each step.
+  2. Queue manager: after finishing each `research-*` task, check TaskList for
+     `topic-*` tasks that are unblocked (research done) and have no owner. If
+     in-flight `topic-runner-*` count is < 3, spawn the next `topic-runner-{slug}`
+     via Agent with team_name={TEAM_NAME}, name="topic-runner-{slug}",
+     run_in_background=true, and the Topic-runner role spec.
+  3. Never DM the user. Use SendMessage to the orchestrator only on errors or
+     when escalation is needed (e.g., auth expired, sources missing).
+
+NEVER:
+  - Spawn more than 3 topic-runners concurrently.
+  - Start research_start with mode=fast — only deep is allowed.
+  - Refresh auth without checking if cached tokens are stale (refresh_auth returns
+    success even on stale tokens; if subsequent calls still fail, escalate).
+```
+
+### Topic-runner role spec
+
+```
+You are `topic-runner-{TOPIC_SLUG}` on team {TEAM_NAME}, channel {CHANNEL_NAME}.
+
+LIFETIME: ad-hoc. You exist for ONE topic. Auto-shutdown after 3.11 completes.
+
+ENTRY:
+  1. Read <topic_dir>/state.json. Skip every step where status == "done".
+  2. Read <topic_dir>/titles.json for {FINAL_TITLE}.
+  3. Read research outputs from state.json steps 3.1–3.3.
+
+DUTIES (with strict intra-topic concurrency plan):
+  - 3.4: studio_create video (BCP-47 language code, never English name).
+         AS SOON AS artifact_id captured, fan out 3.7 (skeleton) + 3.8 + 3.10
+         in a single Agent message (3 parallel sub-agents).
+  - 3.4 polling runs in background via Bash run_in_background=true.
+  - 3.8 returning → spawn 3.9 image gen in parallel with 3.4 poll.
+  - 3.5 download → spawn 3.6 transcription in background.
+  - Post-3.6 (or skipped after 5 min): 3.7 refines into description.txt;
+    3.10 may refine tags.
+  - 3.11: when all ready, write metadata.json, update Notion → Ready,
+    state.json status → ready_for_review, mark task complete, send final
+    "ready" SendMessage to orchestrator, then auto-shutdown.
+
+CHECKPOINT:
+  - Write state.json after EVERY step. Step status: pending | in_progress | done | failed | skipped.
+  - On failure of any step: append to errors[]; surface to orchestrator;
+    leave state.json so a re-spawned runner can resume.
+
+NEVER:
+  - Run 3.4 → 3.5 → 3.6 → 3.7 → 3.8 → 3.9 → 3.10 in serial. Fan out per the plan.
+  - Translate description / thumbnail text into English.
+  - Set privacy=public anywhere.
+```
+
+### Uploader role spec
+
+```
+You are the `uploader` for team {TEAM_NAME}, channel {CHANNEL_NAME}.
+
+LIFETIME: long-lived. You stay alive across batches.
+
+DUTIES:
+  - Phase 5.1 pre-flight, 5.2 upload (SEQUENTIAL — never concurrent), 5.3
+    set_thumbnail, 5.4 verify + auto-fix.
+  - Each upload writes its own state.json step entries (5.2, 5.3, 5.4).
+  - Treat YouTube quota as the hard cap. If quota.remaining < 2000, halt the
+    queue and SendMessage the orchestrator.
+
+NEVER:
+  - Set privacyStatus=public on upload, schedule_publish, or update.
+  - Retry an upload that returned an error (avoids double-uploads).
+  - Treat upload response as authoritative — always re-fetch and verify.
+
+ESCALATION:
+  - PERMISSION_DENIED on set_thumbnail → MANUAL FIX flag (channel not phone-verified).
+  - Quota exhausted → halt queue, SendMessage orchestrator with reset time.
+  - Verify finds privacyStatus=public → flip to {PRIVACY} immediately, then
+    continue verifying.
+```
 
 ---
 
@@ -743,25 +990,23 @@ If any topic shows `⚠️ NEEDS MANUAL FIX`, list each one explicitly below the
 
 | Variable | Set in | Description |
 |---|---|---|
-| `{YT_LIST_CHANNELS}`, `{YT_RECENT_VIDEOS}`, `{YT_UPLOAD}` | 0.1 | Bound YouTube MCP tool names |
-| `{IMG_GEN}` | 0.1 | Image gen tool (Nano Banana Pro preferred) |
-| `{TRANSCRIBE}` | 0.1 | Transcription tool, or null for whisper fallback |
-| `{CHANNEL_ID}`, `{CHANNEL_NAME}` | 0.2 | Picked YouTube channel |
-| `{CHANNEL_CONTEXT}`, `{CHANNEL_TONE}`, `{CHANNEL_AUDIENCE}`, `{CHANNEL_LANGUAGE}`, `{CHANNEL_LANGUAGE_CODE}`, `{CHANNEL_DEFAULT_CTA}` | 0.3 | Channel context fields (cached or first-time) |
+| `{YT_LIST_CHANNELS}`, `{YT_RECENT_VIDEOS}`, `{YT_UPLOAD}`, `{IMG_GEN}`, `{TRANSCRIBE}` | 0.1 | Bound MCP tool names |
+| `{CHANNEL_ID}`, `{CHANNEL_NAME}`, `{CHANNEL_PROFILE}` | 0.2 | Picked YouTube channel |
+| `{CHANNEL_CONTEXT}`, `{CHANNEL_TONE}`, `{CHANNEL_AUDIENCE}`, `{CHANNEL_LANGUAGE}`, `{CHANNEL_LANGUAGE_CODE}`, `{CHANNEL_DEFAULT_CTA}` | 0.3 | Channel context |
 | `{CALENDAR_DB_ID}`, `{CHANNELS_DB_PAGE_ID}` | 0.3 | Notion DB / row IDs |
-| `{DATE_FROM}`, `{DATE_TO}` | 1.1 | Date range to process |
+| `{TEAM_NAME}` | 0.4 | `youtube-<channel_profile>` |
+| `{DATE_FROM}`, `{DATE_TO}` | 1.1 | Date range |
 | `{TOPICS}` | 1.2 | Array of `{topic, publish_date, page_id, existing_status}` |
-| `{RUN_ID}` | 2.1 | Stable per-invocation run identifier |
+| `{PRIVACY}` | 1.3 | `private` or `unlisted` (never public) — collected upfront |
+| `{PUBLISH_AT_UTC}` (per topic) | 1.3 | RFC3339 future timestamp — collected upfront |
+| `{RUN_ID}` | 2.1 | `run-YYYY-MM-DD-<hex>` |
 | `{TOPIC_SLUG}` | per-topic | Kebab-case of topic, ≤60 chars |
-| `{FINAL_TITLE}` | 2.2 | User-selected title for each topic |
+| `{FINAL_TITLE}` | 2.3 | User-selected title per topic |
 | `{NOTEBOOK_ID}`, `{NOTEBOOKLM_URL}` | 3.1 | NotebookLM notebook |
 | `{RESEARCH_ID}` | 3.2 | NotebookLM research job |
-| `{STUDIO_JOB_ID}` | 3.4 | NotebookLM video generation job |
-| `{TRANSCRIPT}` | 3.6 | Full transcript text |
-| `{DESCRIPTION}` | 3.7 | YouTube description |
+| `{STUDIO_JOB_ID}` | 3.4 | NotebookLM video gen artifact |
 | `{THUMBNAIL_TEXT}`, `{THUMBNAIL_IMAGE_PROMPT}` | 3.8 | Thumbnail spec |
-| `{TAGS}` | 3.10 | Array of YouTube tags |
-| `{PRIVACY}` | 4.3 | `private` or `unlisted` (never public) |
+| `{TAGS}` | 3.10 | YouTube tags array |
 | `{YOUTUBE_VIDEO_ID}` | 5.2 | YouTube video ID after upload |
 
 ---
@@ -770,41 +1015,51 @@ If any topic shows `⚠️ NEEDS MANUAL FIX`, list each one explicitly below the
 
 | Situation | Action |
 |---|---|
-| YouTube / image gen MCP missing at 0.1 | Halt with explicit list of missing tools; do not proceed |
-| Channel list returns empty | Surface API response; ask user to verify their MCP auth |
-| Channel context cache exists but is malformed JSON | Print parse error, fall back to Notion lookup, then offer first-time setup |
-| Notion `YouTube Channels` DB not found | Show schema from `schemas/notion-databases.md`; ask user to create it |
+| YouTube / image gen MCP missing at 0.1 | Halt with explicit list + install URLs |
+| Channel list returns empty | Surface API response; ask user to verify MCP auth |
+| Channel context cache malformed | Print parse error, fall back to Notion lookup, then offer first-time setup |
+| Notion `YouTube Channels` DB not found | Show schema; ask user to create it (do not auto-create) |
 | Calendar query returns 0 rows | Ask: add to Notion / inline topics / abort. Never invent. |
-| Title gen subagent fails | Re-spawn that one subagent; if fails twice, ask user to type 5 titles for that topic manually |
-| `research_start` mode parameter rejected | Try alternate naming (`type=deep`, `level=deep`); if all fail, ask user |
-| `research_status` polling times out (>15 min) | Save state, surface error, ask user to retry or skip |
-| `studio_create` returns `Could not retrieve notebook sources` | Likely expired auth, zero sources, or sparse-notebook source mismatch. Run pre-call checks (refresh_auth → `nlm login` if needed → `notebook_get` to confirm `source_count > 0`). If auth is fresh and sources exist, fall back to the `nlm video create` CLI (see Step 3.4 CLI fallback) — its source-handling is more permissive |
-| `studio_create` MCP returns `success` but artifact reaches `failed` within ~60s with no error | Silent-failure pattern. Most common causes: (1) `language` param passed as full English-language name instead of BCP-47 code (`Kannada` ❌, `kn` ✅); (2) sparsely-populated topic-specific notebook. Switch to `nlm video create` CLI with corrected BCP-47 `--language` and a `--focus` constraint; or use a master notebook with broad sources + `--focus` to scope to topic |
-| `studio_create` returns `failed` / `error` from polling (with surfaced error) | Surface the error message verbatim to the user; do not retry blindly. If transient (e.g. Google API error 8), pause ~5 min and retry via the CLI fallback path |
-| `studio_status` polling exceeds ~20 min without `completed` | Save state, surface to user, ask whether to keep waiting or skip |
-| Video file 0 bytes after `download_artifact` | Retry once; if still empty, surface |
-| Transcription path fails | Try next path in priority. If all fail, ask user |
-| Thumbnail Pillow composite fails | Use base image without overlay; flag in summary |
-| Pre-flight assert fails at 5.1 | Halt with the specific check that failed; do not upload |
-| Upload returns error | Surface error to user; do NOT retry automatically (avoid double-uploads) |
-| Notion update fails | Continue (artifacts already on disk + uploaded); print warning |
-| 5.4 verify finds video is `public` | **Immediately** call `youtube_video_set_privacy` with `{PRIVACY}`; re-fetch to confirm; then continue verifying other fields |
-| 5.4 verify finds field mismatch | Call the field-specific fix tool (set_privacy / schedule_publish / set_thumbnail / video_update); re-fetch to confirm; if still mismatched after one fix attempt, mark `⚠️ NEEDS MANUAL FIX` in the final summary |
-| 5.4 `youtube_video_get` fails for a video | Retry once; if still failing, mark that topic as `⚠️ verification skipped` and link to YouTube Studio edit URL so the user can review manually |
+| TeamCreate fails at 0.4 | Halt; surface error. Most likely cause: stale config in `~/.claude/teams/{TEAM_NAME}/`. Ask user before deleting. |
+| `researcher` / `uploader` fails to spawn at 0.5 | Halt; do not silently proceed |
+| Title gen subagent fails | Re-spawn that one; if fails twice, ask user to type 5 titles manually |
+| `research_start` mode parameter rejected | Try `type=deep`, `level=deep`; if all fail, ask user |
+| `research_status` polls timeout (>15 min) | Write step `3.2` → `failed`; surface to orchestrator on next re-entry |
+| `studio_create` returns `Could not retrieve notebook sources` | Likely expired auth, zero sources, or sparse-notebook mismatch. Run pre-call checks. If fresh + sources exist, fall back to `nlm video create` CLI. |
+| `studio_create` MCP returns `success` but artifact reaches `failed` <60s with no error | Silent failure. Most common: language passed as English name (`Kannada` ❌ → `kn` ✅), or sparse notebook. Switch to CLI fallback with corrected BCP-47 + `--focus`, or use master notebook with `focus_prompt`. |
+| `studio_create` returns `failed` from polling (with surfaced error) | Surface verbatim. If transient (Google API error 8), pause ~5 min and retry CLI fallback. |
+| Video file 0 bytes after `download_artifact` | Retry once; if still empty, write 3.5 → `failed`, surface |
+| Transcription path fails | Try next path. If all fail, mark 3.6 → `skipped`. Description from research-only is acceptable. |
+| Thumbnail Pillow composite fails | Use base image without overlay; flag in `errors[]` |
+| Wrong-language video detected post-3.5 | Step 3.4 → `failed`. Halt the runner. Do NOT ship a wrong-language video. |
+| Pre-flight 5.1 fails | Halt for that topic; report specific check; do not upload |
+| Upload returns error | Surface to orchestrator; do NOT retry (avoids double-uploads) |
+| `PERMISSION_DENIED` on `set_thumbnail` | MANUAL FIX flag (channel needs phone verification at youtube.com/verify) |
+| Notion update fails | Continue (artifacts on disk + uploaded); print warning |
+| 5.4 verify finds video `public` | **Immediately** `youtube_video_set_privacy` to `{PRIVACY}`; re-fetch; then continue verifying |
+| 5.4 verify field mismatch | Apply field-specific fix; re-fetch; persistent mismatch → MANUAL FIX |
+| 5.4 `youtube_video_get` fails | Retry once; if still failing, mark `verification skipped` with Studio edit URL |
+| Topic-runner crashes mid-step | `state.json` retains the in-progress step. Next re-entry detects in-flight; orchestrator re-spawns runner; runner reads state.json and resumes from last `done`. |
+| Researcher fails | Long-lived; orchestrator can re-spawn at next Phase 0.5 check. Outstanding `research-*` tasks become unowned and re-claim on next run. |
+| Uploader fails | Same as researcher. Phase 5 work is idempotent at the verify level. |
+| Concurrency exceeds 3 (race) | Researcher's queue manager checks count BEFORE spawn. If a race happens, the over-spawned runner detects in `state.json` that another runner already owns the topic and shuts down. |
 
 ---
 
-## Parallelism notes
+## Parallelism notes (v2.0)
 
-The orchestrator (this skill, running in the main conversation) launches `Agent` subagents:
+**Cross-topic parallelism:** Up to 3 `topic-runner-*` agents run in background concurrently, capped by the researcher's queue manager. The queue is `topic-*` tasks in TaskList; researchers spawn the next runner whenever they finish a `research-*` task and an open slot exists.
 
-- **Phase 2 (titles):** N subagents in parallel — all in one tool-call message — one per topic. Sync on completion.
-- **Phase 3 (heavy):** N subagents in parallel — all in one tool-call message — one per topic. Each subagent's internal 3.1–3.11 chain is sequential. Sync on completion.
-- **Phase 5 (uploads):** parallel via subagents if `{YT_UPLOAD}` is concurrency-safe (most are not — check the tool's docs); otherwise sequential.
+**Intra-topic parallelism (inside one runner):**
+- 3.4 video gen poll runs in `Bash` background.
+- 3.7 (skeleton) + 3.8 + 3.10 fan out at the moment 3.4 submits (3 parallel Agents in a single message).
+- 3.9 image gen runs in parallel with 3.4 poll, kicked off when 3.8 lands.
+- 3.6 transcription runs in background as soon as 3.5 downloads.
+- 3.7 refinement (and optional 3.10 refinement) merges transcript when it lands; ships skeleton if transcript times out.
 
-User gates (Phase 0 setup, Phase 2 picks, Phase 4 review, Phase 4.3 privacy) are always sequential and batched.
+**Phase 5 uploads are sequential** — YouTube quota and rate limits make concurrent uploads risky. The uploader processes its task queue one at a time.
 
-Subagents write all artifacts to disk under the run dir so the orchestrator reads them post-sync. They never edit Notion in ways that race other subagents (each subagent only updates its own topic's row).
+**Gates are always sequential and batched in the main session** (Phase 1.3 collects everything upfront; Phase 4 runs only on re-entry when topics are `ready_for_review`).
 
 ---
 

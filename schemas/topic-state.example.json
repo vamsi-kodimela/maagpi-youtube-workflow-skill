@@ -1,0 +1,35 @@
+{
+  "_comment": "Per-topic checkpoint file. Lives at <run_dir>/<topic_slug>/state.json. Written by topic-runner-<slug> after every step. Resume reads this and skips done steps. Step status: pending | in_progress | done | failed | skipped.",
+  "run_id": "run-2026-05-01-a1b2c3",
+  "topic_slug": "mookambika-shukravara-pooja",
+  "topic": "ಶಾಸ್ತ್ರದ ಪ್ರಕಾರ ಮೂಕಾಂಬಿಕಾ ಶುಕ್ರವಾರ ಪೂಜೆ",
+  "channel_id": "UCjnh-5JgUmD4RaNwFBSx0xA",
+  "channel_profile": "svasti-kannada",
+  "team_name": "youtube-svasti-kannada",
+  "topic_runner_name": "topic-runner-mookambika-shukravara-pooja",
+  "started_at": "2026-05-01T04:00:00Z",
+  "last_updated": "2026-05-01T04:14:00Z",
+  "status": "ready_for_review",
+  "fanout_in_progress": [],
+  "steps": {
+    "2.1": {"status": "done", "completed_at": "2026-05-01T04:00:01Z"},
+    "2.2": {"status": "done", "completed_at": "2026-05-01T04:00:30Z", "outputs": {"titles_path": "<topic_dir>/titles.json"}},
+    "2.3": {"status": "done", "completed_at": "2026-05-01T04:01:10Z", "outputs": {"final_title": "ಮೂಕಾಂಬಿಕಾ ಶುಕ್ರವಾರ ಪೂಜೆ — ಶಾಸ್ತ್ರದ ಪ್ರಕಾರ ಸಂಪೂರ್ಣ ವಿಧಾನ"}},
+    "3.1": {"status": "done", "completed_at": "2026-05-01T04:01:45Z", "outputs": {"notebook_id": "bda43540-af67-499a-bcb0-bf0c3920a00b", "notebooklm_url": "https://notebooklm.google.com/notebook/bda43540-af67-499a-bcb0-bf0c3920a00b"}, "owner": "researcher"},
+    "3.2": {"status": "done", "completed_at": "2026-05-01T04:06:40Z", "outputs": {"research_id": "..."}, "owner": "researcher"},
+    "3.3": {"status": "done", "completed_at": "2026-05-01T04:07:15Z", "outputs": {"source_count": 28}, "owner": "researcher"},
+    "3.4": {"status": "done", "completed_at": "2026-05-01T04:11:50Z", "outputs": {"studio_job_id": "8ef15a6e-b8b6-4d81-b568-c9bbe88386e7", "language_verified": "kn"}},
+    "3.5": {"status": "done", "completed_at": "2026-05-01T04:12:30Z", "outputs": {"video_path": "D:\\projects\\youtube-skill\\runs\\run-2026-05-01-a1b2c3\\mookambika-shukravara-pooja\\video.mp4", "size_bytes": 52398304}},
+    "3.6": {"status": "skipped", "completed_at": "2026-05-01T04:12:35Z", "reason": "no transcription path available; whisper not installed; NotebookLM did not expose transcript field"},
+    "3.7": {"status": "done", "completed_at": "2026-05-01T04:09:20Z", "outputs": {"description_path": "<topic_dir>/description.txt", "source": "research-derived (no transcript refinement)"}, "fanout": true},
+    "3.8": {"status": "done", "completed_at": "2026-05-01T04:08:15Z", "outputs": {"thumbnail_spec_path": "<topic_dir>/thumbnail-spec.json"}, "fanout": true},
+    "3.9": {"status": "done", "completed_at": "2026-05-01T04:09:50Z", "outputs": {"thumbnail_path": "<topic_dir>/thumbnail.png", "size_bytes": 811300, "text_overlay_verified": true}},
+    "3.10": {"status": "done", "completed_at": "2026-05-01T04:08:40Z", "outputs": {"tags_path": "<topic_dir>/tags.json", "tag_count": 15}, "fanout": true},
+    "3.11": {"status": "done", "completed_at": "2026-05-01T04:14:00Z", "outputs": {"metadata_path": "<topic_dir>/metadata.json"}}
+  },
+  "errors": [],
+  "_history": [
+    {"at": "2026-05-01T04:08:00Z", "event": "fanout_spawned", "agents": ["3.7-skeleton", "3.8-spec", "3.10-tags"]},
+    {"at": "2026-05-01T04:08:15Z", "event": "3.8 done — spawning 3.9 image gen in parallel with 3.4 poll"}
+  ]
+}
