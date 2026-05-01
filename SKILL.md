@@ -311,33 +311,52 @@ Verify the notebook now has sources (call `mcp__notebooklm-mcp__source_list_driv
 
 ### STEP 3.4 — Generate Explainer video in channel language
 
-Use the unified studio creation tool `mcp__notebooklm-mcp__studio_create` with the exact parameter shape below. Do **not** use the legacy `video` CLI tool or any other variant — this is the only supported call for this workflow.
+Use `mcp__notebooklm-mcp__studio_create` as the **primary** call. If the MCP fails (any of: returns `status: error`, returns success but the artifact reaches `status: failed` within ~60s, or returns `Could not retrieve notebook sources` with auth confirmed fresh), **fall back to the `nlm video create` CLI** — same parameters, more robust path. Both paths are documented below.
 
 #### Pre-call checks (run in order — skipping these is the most common failure mode)
 
-1. **Verify auth is fresh.** If any prior MCP call in this session returned `Authentication expired`, call `mcp__notebooklm-mcp__refresh_auth` first. If that does not resolve it, ask the user to run `! nlm login` in the prompt, then call `refresh_auth` again. Do not attempt video generation while auth is expired — the call will fail with `Could not retrieve notebook sources`, which is a *misleading* downstream symptom of expired auth.
-2. **Confirm sources exist.** Call `mcp__notebooklm-mcp__notebook_get` with `{NOTEBOOK_ID}` and verify `source_count > 0`. A notebook with zero sources will fail video generation with the same misleading sources error. If `source_count == 0`, halt and surface — step 3.3 should have populated sources, so this indicates an upstream failure to investigate, not a retry candidate.
+1. **Verify auth is fresh.** If any prior MCP call in this session returned `Authentication expired`, call `mcp__notebooklm-mcp__refresh_auth` first. Note: `refresh_auth` only reloads cached tokens from disk — if the cached tokens are themselves stale, it returns `success` but auth is still broken. If a subsequent call still hits an auth error, ask the user to run `! nlm login` in the prompt to do browser-based re-auth, then call `refresh_auth` again. Do not attempt video generation while auth is expired — the call will fail with `Could not retrieve notebook sources`, which is a *misleading* downstream symptom of expired auth.
+2. **Confirm sources exist and match the topic.** Call `mcp__notebooklm-mcp__notebook_get` with `{NOTEBOOK_ID}` and verify `source_count > 0`. A notebook with zero sources will fail video generation with the same misleading sources error. **Sparsely-populated notebooks (e.g. ≤10 narrowly-focused sources from one research run) sometimes silently fail — even when sources are listed.** If you have access to a master notebook with broad relevant sources for the channel's domain, prefer it and use `focus_prompt` to constrain the narrative to the topic. If `source_count == 0`, halt — step 3.3 should have populated sources, so this indicates an upstream failure.
 
-#### Required parameters
+#### Required parameters (MCP — primary path)
 
 | Param | Value | Notes |
 |---|---|---|
-| `notebook_id` | `{NOTEBOOK_ID}` | UUID from step 3.1 |
+| `notebook_id` | `{NOTEBOOK_ID}` | UUID from step 3.1 (or master notebook per pre-call check #2) |
 | `artifact_type` | `"video"` | string literal — not `video_overview` or any alias |
 | `video_format` | `"explainer"` | do not omit — defaults are not safe to rely on |
-| `language` | `{CHANNEL_LANGUAGE}` — full English-language name, e.g. `"Telugu"`, `"Hindi"`, `"English"`, `"Kannada"`, `"Tamil"`, `"Spanish"` | **Never** use ISO codes (`te`, `hi`, `en`) or shortcuts — the MCP expects the full English-language name of the target language |
+| `language` | `{CHANNEL_LANGUAGE_CODE}` — **BCP-47 code**, e.g. `"kn"` (Kannada), `"te"` (Telugu), `"hi"` (Hindi), `"en"` (English), `"ta"` (Tamil), `"es"` (Spanish) | The MCP expects the BCP-47 ISO code, NOT the full English-language name. Passing `"Kannada"` or `"Telugu"` causes the artifact to silently fail (status flips to `failed` within seconds, no error message). |
 | `confirm` | `true` | mandatory — the tool refuses to start generation without explicit confirmation |
 
 #### Optional parameters
 
-Only set these if the user explicitly requested them — otherwise omit and let NotebookLM defaults apply:
+Only set these if the user explicitly requested them — otherwise omit and let NotebookLM defaults apply (exception: `focus_prompt` is recommended whenever using a broad master notebook, see pre-call check #2):
 
 - `video_style_prompt` — string for visual-style guidance
-- `focus_prompt` — string to bias the narrative toward specific angles
+- `focus_prompt` — string to bias the narrative toward specific angles. **Use this whenever the notebook contains sources beyond the immediate topic** to keep the video on-topic.
 - `custom_prompt` — string for full prompt override
 - `source_ids` — array of source UUIDs to restrict generation to a subset (defaults to all sources)
 
-#### Expected success response shape
+#### CLI fallback (`nlm video create`) — use when MCP fails
+
+If the MCP path errors out OR the artifact reaches `status: failed` quickly with no surfaced error, retry the same generation via the `nlm` CLI:
+
+```
+nlm video create {NOTEBOOK_ID} \
+  --format explainer \
+  --language {CHANNEL_LANGUAGE_CODE} \
+  --focus "<focus_prompt — 1-3 sentences scoping the topic>" \
+  --confirm
+```
+
+Notes on the CLI path:
+- `--language` takes the same **BCP-47 code** as the MCP (`kn`, `te`, `hi`, etc.).
+- `--focus` is the equivalent of MCP `focus_prompt` and is strongly recommended on master notebooks.
+- The CLI prints `✓ Video generation started` followed by `Artifact ID: <uuid>` on success. Capture the UUID as `{STUDIO_JOB_ID}` and poll the same way as the MCP path.
+- The CLI uses the same auth tokens as the MCP — `nlm login` recovery applies to both.
+- **Why the CLI sometimes succeeds when the MCP fails:** the CLI's request shape and source-handling are slightly more permissive in practice. When you see a transient Google API error 8 or a sparse-notebook silent failure on the MCP, the CLI is the documented retry path.
+
+#### Expected success response shape (MCP)
 
 ```json
 {
@@ -350,14 +369,21 @@ Only set these if the user explicitly requested them — otherwise omit and let 
 }
 ```
 
-Capture `artifact_id` as `{STUDIO_JOB_ID}` — required for polling and download.
+Capture `artifact_id` as `{STUDIO_JOB_ID}` — required for polling and download (regardless of MCP vs CLI origin).
 
 #### Polling for completion
 
-- Call `mcp__notebooklm-mcp__studio_status` with `notebook_id={NOTEBOOK_ID}` to list all artifacts; find the entry matching `{STUDIO_JOB_ID}`.
-- Telugu and other non-English explainer videos typically take **5–15 minutes**. Poll at ~60s intervals; **do not poll faster than every 30s**. Cap at 20 attempts (≈20 minutes).
-- Treat `artifact_status: "in_progress"` as expected. Only proceed to step 3.5 when status is `"completed"` (or equivalent terminal-success value) and a download URL is present.
-- If status becomes `"failed"` or `"error"`, surface the error message **verbatim** to the user — do not retry blindly.
+- Call `mcp__notebooklm-mcp__studio_status` with `notebook_id={NOTEBOOK_ID}` (or `nlm studio status {NOTEBOOK_ID}` from shell) to list all artifacts; find the entry matching `{STUDIO_JOB_ID}`.
+- For long polls (5–15 min for non-English explainers), use `Bash` with `run_in_background: true` and an `until` loop:
+  ```
+  until out=$(nlm studio status {NOTEBOOK_ID} 2>&1); \
+    echo "$out" | grep -A2 "{STUDIO_JOB_ID}" | grep -qE "completed|failed|error"; \
+    do sleep 90; done; \
+    echo "$out" | grep -A4 "{STUDIO_JOB_ID}"
+  ```
+  This emits a single completion notification when the artifact reaches a terminal state. Cap at 20 attempts (~30 min via timeout). Do not poll faster than every 30s.
+- Treat `status: "in_progress"` as expected. Only proceed to step 3.5 when status is `"completed"` (or equivalent terminal-success value) and a download URL is present.
+- **Quick-fail signal:** if the artifact reaches `status: failed` within ~60s of submission with no error message, that is the silent-failure pattern (usually a wrong language param or sparse-notebook source mismatch). Do not retry blindly — switch to the CLI fallback above with corrected params, or use a more populated notebook with `focus_prompt`.
 
 > ⚠️ **Language verification.** After download (step 3.5) and before description drafting (step 3.7), spot-check the first 30 seconds of the transcript: if `{CHANNEL_LANGUAGE}` is non-English and the transcript came back in English, the language param did not take. Halt and tell the user — do not proceed to publish a wrong-language video.
 
@@ -752,8 +778,9 @@ If any topic shows `⚠️ NEEDS MANUAL FIX`, list each one explicitly below the
 | Title gen subagent fails | Re-spawn that one subagent; if fails twice, ask user to type 5 titles for that topic manually |
 | `research_start` mode parameter rejected | Try alternate naming (`type=deep`, `level=deep`); if all fail, ask user |
 | `research_status` polling times out (>15 min) | Save state, surface error, ask user to retry or skip |
-| `studio_create` returns `Could not retrieve notebook sources` | Likely expired auth or zero sources. Run pre-call checks (refresh_auth → `nlm login` if needed → `notebook_get` to confirm `source_count > 0`); only retry once both pass |
-| `studio_create` returns `failed` / `error` from polling | Surface the error message verbatim to the user; do not retry blindly |
+| `studio_create` returns `Could not retrieve notebook sources` | Likely expired auth, zero sources, or sparse-notebook source mismatch. Run pre-call checks (refresh_auth → `nlm login` if needed → `notebook_get` to confirm `source_count > 0`). If auth is fresh and sources exist, fall back to the `nlm video create` CLI (see Step 3.4 CLI fallback) — its source-handling is more permissive |
+| `studio_create` MCP returns `success` but artifact reaches `failed` within ~60s with no error | Silent-failure pattern. Most common causes: (1) `language` param passed as full English-language name instead of BCP-47 code (`Kannada` ❌, `kn` ✅); (2) sparsely-populated topic-specific notebook. Switch to `nlm video create` CLI with corrected BCP-47 `--language` and a `--focus` constraint; or use a master notebook with broad sources + `--focus` to scope to topic |
+| `studio_create` returns `failed` / `error` from polling (with surfaced error) | Surface the error message verbatim to the user; do not retry blindly. If transient (e.g. Google API error 8), pause ~5 min and retry via the CLI fallback path |
 | `studio_status` polling exceeds ~20 min without `completed` | Save state, surface to user, ask whether to keep waiting or skip |
 | Video file 0 bytes after `download_artifact` | Retry once; if still empty, surface |
 | Transcription path fails | Try next path in priority. If all fail, ask user |
