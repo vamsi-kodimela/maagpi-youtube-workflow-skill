@@ -27,6 +27,7 @@ desktop.ini
 state/channels/*.json
 state/runs/
 dist/
+runs/
 # Environment / secrets
 .env
 .env.*
